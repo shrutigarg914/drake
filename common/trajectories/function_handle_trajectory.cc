@@ -48,6 +48,9 @@ MatrixX<T> FunctionHandleTrajectory<T>::DoEvalDerivative(
   // T t1 = std::min(end_time(), t + eps);
   // T dt = t1 - t0;
   // DRAKE_THROW_UNLESS(dt > 0);
+  if (t == start_time() || t == end_time()) {
+    return Eigen::MatrixXd::Zero(rows_, cols_);
+  }
   if (derivative_order == 1) {
     // return math::jacobian(func_, Eigen::Vector<double, 1>(static_cast<double>(t)));
     // return math::jacobian(func_, Eigen::Vector<T, 1>(t));

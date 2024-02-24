@@ -18,6 +18,7 @@ from pydrake.trajectories import (
     BsplineTrajectory_,
     CompositeTrajectory_,
     FunctionHandleTrajectory_,
+    DerivativeTrajectory_,
     PathParameterizedTrajectory_,
     PiecewisePolynomial_,
     PiecewisePose_,
@@ -33,6 +34,9 @@ from pydrake.symbolic import Variable, Expression
 class CustomTrajectory(Trajectory):
     def __init__(self):
         Trajectory.__init__(self)
+
+    def Clone(self):
+        return CustomTrajectory()
 
     def rows(self):
         return 1
@@ -60,6 +64,9 @@ class CustomTrajectory(Trajectory):
         elif derivative_order == 0:
             return self.value(t)
 
+    def DoMakeDerivative(self, derivative_order):
+        return DerivativeTrajectory_[float](self, derivative_order)
+
 
 class TestTrajectories(unittest.TestCase):
     @numpy_compare.check_all_types
@@ -83,6 +90,12 @@ class TestTrajectories(unittest.TestCase):
         numpy_compare.assert_float_equal(
             trajectory.EvalDerivative(t=2.3, derivative_order=2),
             np.zeros((1, 2)))
+        clone = trajectory.Clone()
+        numpy_compare.assert_float_equal(clone.value(t=1.5),
+                                         np.array([[2.5, 3.5]]))
+        deriv = trajectory.MakeDerivative(derivative_order=1)
+        numpy_compare.assert_float_equal(
+            deriv.value(t=2.3), np.ones((1, 2)))
 
     @numpy_compare.check_all_types
     def test_bezier_curve(self, T):
@@ -180,6 +193,16 @@ class TestTrajectories(unittest.TestCase):
         copy.copy(dut)
         copy.deepcopy(dut)
 
+    def test_derivative_trajectory(self, T):
+        breaks = [0, 1, 2]
+        samples = [[[0]], [[1]], [[2]]]
+        foh = PiecewisePolynomial_[T].FirstOrderHold(breaks, samples)
+        dut = DerivativeTrajectory_[T](nominal=foh, derivative_order=1)
+        self.assertEqual(dut.rows(), 1)
+        self.assertEqual(dut.cols(), 1)
+        dut.Clone()
+        copy.copy(dut)
+        copy.deepcopy(dut)
 
     def test_legacy_unpickle(self):
         """Checks that data pickled as BsplineTrajectory_[float] in Drake

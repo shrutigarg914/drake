@@ -9,6 +9,7 @@
 #include "drake/common/trajectories/bspline_trajectory.h"
 #include "drake/common/trajectories/composite_trajectory.h"
 #include "drake/common/trajectories/function_handle_trajectory.h"
+#include "drake/common/trajectories/derivative_trajectory.h"
 #include "drake/common/trajectories/path_parameterized_trajectory.h"
 #include "drake/common/trajectories/piecewise_polynomial.h"
 #include "drake/common/trajectories/piecewise_pose.h"
@@ -333,6 +334,18 @@ struct Impl {
               py::arg("start_time") = -std::numeric_limits<double>::infinity(),
               py::arg("end_time") = std::numeric_limits<double>::infinity(),
               cls_doc.ctor.doc)
+          .def("Clone", &Class::Clone, cls_doc.Clone.doc);
+      DefCopyAndDeepCopy(&cls);
+    }
+
+    {
+      using Class = DerivativeTrajectory<T>;
+      constexpr auto& cls_doc = doc.DerivativeTrajectory;
+      auto cls = DefineTemplateClassWithDefault<Class, Trajectory<T>>(
+          m, "DerivativeTrajectory", param, cls_doc.doc);
+      cls  // BR
+          .def(py::init<const Trajectory<T>&, int>(), py::arg("nominal"),
+              py::arg("derivative_order") = 1, cls_doc.ctor.doc)
           .def("Clone", &Class::Clone, cls_doc.Clone.doc);
       DefCopyAndDeepCopy(&cls);
     }
