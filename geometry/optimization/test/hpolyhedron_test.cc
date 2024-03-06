@@ -198,6 +198,7 @@ GTEST_TEST(HPolyhedronTest, ConstructorFromVPolytopeQHullProblems) {
   // Test cases of VPolytopes that QHull cannot handle on its own.
   // Code logic in the constructor should handle these cases without any
   // QHull errors.
+  const double kTol = 1e-11;
 
   // Case 1: Not enough points (need at least n+1 points in R^n). This
   // will throw QHull error QH6214.
