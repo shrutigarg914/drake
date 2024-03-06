@@ -379,11 +379,16 @@ HPolyhedron::HPolyhedron(const MathematicalProgram& prog)
     }
   }
 
-  VectorXd b_eigen(b.size());
-  b_eigen = VectorXd::Map(b.data(), b.size());
+  MatrixXd A_dense(A_sparse);
 
-  *this = HPolyhedron(A_sparse.toDense()(rows_to_keep, Eigen::all),
-                      b_eigen(rows_to_keep));
+  MatrixXd A_out(ssize(rows_to_keep), A_dense.cols());
+  VectorXd b_out(ssize(rows_to_keep));
+  for (int i = 0; i < ssize(rows_to_keep); ++i) {
+    A_out.row(i) = A_dense.row(rows_to_keep[i]);
+    b_out(i) = b[rows_to_keep[i]];
+  }
+
+  *this = HPolyhedron(A_out, b_out);
 }
 
 HPolyhedron::~HPolyhedron() = default;

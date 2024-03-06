@@ -588,7 +588,7 @@ GTEST_TEST(AffineSubspaceTest, AffineHullHPolyhedron) {
 
   // Numerically-challenging HPolyhedron from #20985.
   Eigen::Matrix<double, 6, 3> A3;
-  Eigen::Vector<double, 6> b3;
+  Eigen::VectorXd b3(6);
   // clang-format off
   A3 <<  1,  0,  0,
          0,  1,  0,
