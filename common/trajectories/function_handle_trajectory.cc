@@ -37,6 +37,17 @@ MatrixX<T> FunctionHandleTrajectory<T>::value(const T& t) const {
   return func_(t);
 }
 
+template <typename T>
+MatrixX<T> FunctionHandleTrajectory<T>::DoEvalDerivative(
+    const T& t, int derivative_order) const {
+  const double eps = 1e-3;
+  if (derivative_order == 1) {
+    return (value(t + eps) - value(t - eps)) / (2 * eps);
+  } else {
+    return (DoEvalDerivative(t + eps, derivative_order - 1) - DoEvalDerivative(t - eps, derivative_order - 1)) / (2 * eps);
+  }
+}
+
 }  // namespace trajectories
 }  // namespace drake
 

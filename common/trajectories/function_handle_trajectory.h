@@ -44,7 +44,8 @@ class FunctionHandleTrajectory final : public Trajectory<T> {
 
  private:
   // Trajectory overrides.
-  bool do_has_derivative() const final { return false; }
+  MatrixX<T> DoEvalDerivative(const T& t, int derivative_order) const final;
+  bool do_has_derivative() const final { return true; }
 
   std::function<MatrixX<T>(const T&)> func_{};
   reset_after_move<int> rows_;
