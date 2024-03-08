@@ -59,6 +59,7 @@ drake_cc_library(
         ":trajectory",
         "//common:default_scalars",
         "//common:essential",
+        "//math:jacobian"
     ],
 )
 
