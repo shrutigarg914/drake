@@ -57,11 +57,13 @@ MatrixX<T> FunctionHandleTrajectory<T>::DoEvalDerivative(
     // return math::jacobian(func_, t);
     return (value(t + eps) - value(t - eps)) / (2 * eps);
     // return (value(t1) - value(t0)) / (dt);
-    // return (-value(t + 2 * eps) + 8 * value(t + eps) - 8 * value(t - eps) + value(t - 2 * eps)) / (12 * eps);
+  //   return (-value(t + 2 * eps) + 8 * value(t + eps) - 8 * value(t - eps) + value(t - 2 * eps)) / (12 * eps);
   // } else if (derivative_order == 2) {
   //   return (-value(t + 2 * eps) + 16 * value(t + eps) - 30 * value(t) + 16 * value(t - eps) - value(t - 2 * eps)) / (12 * eps * eps);
   // } else if (derivative_order == 2) {
   //   return math::hessian(func_, Eigen::Vector<T, 1>(t));
+  // } else if (derivative_order == 2) {
+  //   return (value(t - eps) - (2 * value(t)) + value(t + eps)) / (eps * eps);
   } else {
     return (DoEvalDerivative(t + eps, derivative_order - 1) - DoEvalDerivative(t - eps, derivative_order - 1)) / (2 * eps);
     // return (DoEvalDerivative(t1, derivative_order - 1) - DoEvalDerivative(t0, derivative_order - 1)) / (dt);
