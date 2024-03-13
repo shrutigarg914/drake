@@ -3,6 +3,8 @@
 #include "drake/common/is_approx_equal_abstol.h"
 #include "drake/solvers/solve.h"
 
+#include <iostream>
+
 namespace drake {
 namespace geometry {
 namespace optimization {
@@ -43,7 +45,6 @@ AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
                            singleton_maybe.value());
     return;
   }
-
   // If the set is not clearly a singleton, we find a feasible point and
   // iteratively compute a basis of the affine hull. If no feasible point
   // exists, the set is empty, so we throw an error.
@@ -53,25 +54,15 @@ AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
         "AffineSubspace: Cannot take the affine hull of an empty set!");
   }
   const VectorXd translation = translation_maybe.value();
-  // The basis of the affine hull. We preallocate the maximum dimension this
-  // basis could assume.
-  MatrixXd basis(set.ambient_dimension(), set.ambient_dimension());
-  // The basis of the orthogonal complement.
-  MatrixXd basis_orth = Eigen::MatrixXd::Identity(set.ambient_dimension(),
-                                                  set.ambient_dimension());
-  const MatrixXd I =
-      MatrixXd::Identity(set.ambient_dimension(), set.ambient_dimension());
-  int affine_dimension = 0;
+  MatrixXd basis_vectors(set.ambient_dimension(), 0);
 
   // Create the mathematical program we will use to find basis vectors.
   MathematicalProgram prog;
-
   // x represents the displacement within a feasible set. We add a bounding box
   // constraint to ensure the problem is not unbounded.
   VectorXDecisionVariable x =
       prog.NewContinuousVariables(set.ambient_dimension(), "x");
   prog.AddBoundingBoxConstraint(-1, 1, x);
-
   // y and z are two feasible points in the set
   VectorXDecisionVariable y =
       prog.NewContinuousVariables(set.ambient_dimension(), "y");
@@ -80,26 +71,51 @@ AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
   prog.AddLinearConstraint(x == y - z);
   set.AddPointInSetConstraints(&prog, y);
   set.AddPointInSetConstraints(&prog, z);
-
   // This is the objective we use. At each iteration, we will update this cost
   // to search for a new basis vector. Anytime this value is negative, it means
   // we have found a new feasible direction, so we add it to the basis, and also
   // constrain future feasible x vectors to be orthogonal to it (to ensure
   // linear independence of the basis).
-  Binding<LinearCost> objective =
-      prog.AddLinearCost(VectorXd::Zero(set.ambient_dimension()), x);
+  VectorXd new_objective_vector = VectorXd::Zero(set.ambient_dimension());
+  Binding<LinearCost> objective = prog.AddLinearCost(new_objective_vector, x);
 
-  // We build up a basis of the affine hull iteratively.  For each vector v in
-  // the orthogonal complement of the affine hull basis, we try to
-  // minimize <x,v>. If the inner product is less than -tol, we add x to the
-  // basis vectors and increment our count of the affine dimension. If no vector
-  // in the orthogonal complement basis generates a sufficiently negative cost,
-  // then we have succeeded in computing the affine hull.
-  while (affine_dimension < set.ambient_dimension()) {
-    int j = 0;
-    for (; j < set.ambient_dimension(); ++j) {
-      objective.evaluator()->UpdateCoefficients(basis_orth.col(j));
-      // Minimize <x, objective>.
+  // The dimension of the affine hull is bounded above by the ambient dimension.
+  // We build up a basis of the affine hull iteratively. At each iteration, we
+  // compute the perpendicular basis of the current affine hull basis (which is
+  // stored in basis_vectors). For each vector v in the perpendicular basis, we
+  // try to maximize <x,v>. If the inner product exceeds tol, we add x to
+  // basis_vectors and break out of the inner loop. If we complete the inner
+  // loop without adding a single vector, then we have finished computing the
+  // affine hull.
+  int solve_count = 0;
+  for (int i = 0; i < set.ambient_dimension(); ++i) {
+    // Compute the perpendicular basis of basis_vectors. This is equivalent to
+    // the kernel of the QR decomposition, which will be the rightmost columns
+    // of the Q matrix, as described here:
+    // https://stackoverflow.com/questions/54766392/eigen-obtain-the-kernel-of-a-sparse-matrix
+    // Note: if we have no basis vectors yet, we just use the identity matrix,
+    // as taking the QR decomposition of an empty matrix causes a segmentation
+    // fault in Eigen.
+    MatrixXd perpendicular_basis =
+        MatrixXd::Identity(set.ambient_dimension(), set.ambient_dimension());
+    int perpendicular_basis_dimension =
+        set.ambient_dimension() - basis_vectors.cols();
+    if (basis_vectors.cols() > 0) {
+      Eigen::ColPivHouseholderQR<MatrixXd> current_basis_decomp(basis_vectors);
+      MatrixXd Q =
+          current_basis_decomp.householderQ() *
+          MatrixXd::Identity(set.ambient_dimension(), set.ambient_dimension());
+      perpendicular_basis = Q.rightCols(perpendicular_basis_dimension);
+    }
+
+    int old_basis_size = basis_vectors.cols();
+    // std::cout << "Total solves so far: " << solve_count << "\t Current Affine Dimension: " << i << std::endl;
+    for (int j = 0; j < perpendicular_basis.cols(); ++j) {
+      new_objective_vector = perpendicular_basis.col(j);
+      objective.evaluator()->UpdateCoefficients(new_objective_vector);
+
+      // Minimize <x,objective>.
+      ++solve_count;
       auto result = solvers::Solve(prog);
       if (!result.is_success()) {
         throw std::runtime_error(fmt::format(
@@ -108,28 +124,22 @@ AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
             result.get_solution_result()));
       }
       if (result.get_optimal_cost() < -tol) {
-        // In principle result.GetSolution(x) should be orthogonal to the basis,
-        // but we still perform this projection for numerical reasons.
-        VectorXd new_basis_vector =
-            (I - basis.leftCols(affine_dimension) *
-                     basis.leftCols(affine_dimension).transpose()) *
-            result.GetSolution(x);
-        basis.col(affine_dimension++) =
-            new_basis_vector / new_basis_vector.norm();
-        prog.AddLinearEqualityConstraint(basis.col(affine_dimension - 1), 0, x);
+        // Get the solution as a new basis vector, and add a constraint that x
+        // must now be orthogonal to that new basis vector.
+        basis_vectors.conservativeResize(basis_vectors.rows(),
+                                         basis_vectors.cols() + 1);
+        basis_vectors.rightCols(1) = result.GetSolution(x);
+        prog.AddLinearEqualityConstraint(basis_vectors.rightCols(1), 0, x);
 
-        // The matrix is orthogonal to the basis vectors, but will not be full
-        // column rank.
-        basis_orth = (I - basis.leftCols(affine_dimension) *
-                              basis.leftCols(affine_dimension).transpose());
-        // Normalize the columns for numerical stability.
-        for (int i = 0; i < basis_orth.cols(); i++) {
-          basis_orth.col(i).normalize();
-        }
+        // Now that we've found a new basis vector, we break out of the inner
+        // loop, to compute a new perpendicular basis.
         break;
       }
     }
-    if (j == set.ambient_dimension()) {
+    if (old_basis_size == basis_vectors.cols()) {
+      // If we haven't found any new basis vectors after iterating over the
+      // whole perpendicular basis, then we're not going to find any new basis
+      // vectors, and can break out of the outer loop.
       break;
     }
   }
@@ -137,8 +147,130 @@ AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
   // By construction, basis_vectors is linearly independent. Because we have
   // checked each direction in the ambient space, it will also span the other
   // convex set, so we now have its affine hull.
-  *this = AffineSubspace(basis.leftCols(affine_dimension), translation);
+  *this = AffineSubspace(basis_vectors, translation);
 }
+
+// AffineSubspace::AffineSubspace(const ConvexSet& set, double tol)
+//     : ConvexSet(0, true) {
+//   // If the set is clearly a singleton, we can easily compute its affine hull.
+//   const auto singleton_maybe = set.MaybeGetPoint();
+//   if (singleton_maybe.has_value()) {
+//     // Fall back to the basis and translation constructor.
+//     *this = AffineSubspace(Eigen::MatrixXd::Zero(set.ambient_dimension(), 0),
+//                            singleton_maybe.value());
+//     return;
+//   }
+
+//   // If the set is not clearly a singleton, we find a feasible point and
+//   // iteratively compute a basis of the affine hull. If no feasible point
+//   // exists, the set is empty, so we throw an error.
+//   const auto translation_maybe = set.MaybeGetFeasiblePoint();
+//   if (!translation_maybe.has_value()) {
+//     throw std::runtime_error(
+//         "AffineSubspace: Cannot take the affine hull of an empty set!");
+//   }
+//   const VectorXd translation = translation_maybe.value();
+//   // The basis of the affine hull. We preallocate the maximum dimension this
+//   // basis could assume.
+//   MatrixXd basis(set.ambient_dimension(), set.ambient_dimension());
+//   // The basis of the orthogonal complement.
+//   MatrixXd basis_orth = Eigen::MatrixXd::Identity(set.ambient_dimension(),
+//                                                   set.ambient_dimension());
+//   const MatrixXd I =
+//       MatrixXd::Identity(set.ambient_dimension(), set.ambient_dimension());
+//   int affine_dimension = 0;
+
+//   // Create the mathematical program we will use to find basis vectors.
+//   MathematicalProgram prog;
+
+//   // x represents the displacement within a feasible set. We add a bounding box
+//   // constraint to ensure the problem is not unbounded.
+//   VectorXDecisionVariable x =
+//       prog.NewContinuousVariables(set.ambient_dimension(), "x");
+//   prog.AddBoundingBoxConstraint(-1, 1, x);
+
+//   // y and z are two feasible points in the set
+//   VectorXDecisionVariable y =
+//       prog.NewContinuousVariables(set.ambient_dimension(), "y");
+//   VectorXDecisionVariable z =
+//       prog.NewContinuousVariables(set.ambient_dimension(), "z");
+//   prog.AddLinearConstraint(x == y - z);
+//   set.AddPointInSetConstraints(&prog, y);
+//   set.AddPointInSetConstraints(&prog, z);
+
+//   // This is the objective we use. At each iteration, we will update this cost
+//   // to search for a new basis vector. Anytime this value is negative, it means
+//   // we have found a new feasible direction, so we add it to the basis, and also
+//   // constrain future feasible x vectors to be orthogonal to it (to ensure
+//   // linear independence of the basis).
+//   Binding<LinearCost> objective =
+//       prog.AddLinearCost(VectorXd::Zero(set.ambient_dimension()), x);
+
+//   // We build up a basis of the affine hull iteratively.  For each vector v in
+//   // the orthogonal complement of the affine hull basis, we try to
+//   // minimize <x,v>. If the inner product is less than -tol, we add x to the
+//   // basis vectors and increment our count of the affine dimension. If no vector
+//   // in the orthogonal complement basis generates a sufficiently negative cost,
+//   // then we have succeeded in computing the affine hull.
+//   int solve_count = 0;
+//   while (affine_dimension < set.ambient_dimension()) {
+//     std::cout << "Total solves so far: " << solve_count << "\t Current Affine Dimension: " << affine_dimension << std::endl;
+//     int j = 0;
+//     std::vector<int> v(set.ambient_dimension());
+//     std::iota(std::begin(v), std::end(v), 0);
+//     auto rng = std::default_random_engine {};
+//     std::shuffle(std::begin(v), std::end(v), rng);
+//     for (; j < set.ambient_dimension(); ++j) {
+//       objective.evaluator()->UpdateCoefficients(basis_orth.col(v[j]));
+//       // Minimize <x, objective>.
+//       auto result = solvers::Solve(prog);
+//       ++solve_count;
+//       if (!result.is_success()) {
+//         throw std::runtime_error(fmt::format(
+//             "AffineSubspace: Failed to compute the affine hull! The "
+//             "solution result was {}.",
+//             result.get_solution_result()));
+//       }
+//       if (result.get_optimal_cost() < -tol) {
+//         // In principle result.GetSolution(x) should be orthogonal to the basis,
+//         // but we still perform this projection for numerical reasons.
+//         VectorXd new_basis_vector =
+//             (I - basis.leftCols(affine_dimension) *
+//                      basis.leftCols(affine_dimension).transpose()) *
+//             result.GetSolution(x);
+//         basis.col(affine_dimension++) =
+//             new_basis_vector / new_basis_vector.norm();
+//         prog.AddLinearEqualityConstraint(basis.col(affine_dimension - 1), 0, x);
+
+//         // The matrix is orthogonal to the basis vectors, but will not be full
+//         // column rank.
+//         basis_orth = (I - basis.leftCols(affine_dimension) *
+//                               basis.leftCols(affine_dimension).transpose());
+//         // Normalize the columns for numerical stability.
+//         for (int i = 0; i < basis_orth.cols(); i++) {
+//           basis_orth.col(i).normalize();
+//         }
+//         break;
+//       } else {
+//         // In principle result.GetSolution(x) should be orthogonal to the basis,
+//         // but we still perform this projection for numerical reasons.
+//         VectorXd perp_basis_vector =
+//             (I - basis.leftCols(affine_dimension) *
+//                      basis.leftCols(affine_dimension).transpose()) *
+//             result.GetSolution(x);
+//         prog.AddLinearEqualityConstraint(perp_basis_vector, 0, x);
+//       }
+//     }
+//     if (j == set.ambient_dimension()) {
+//       break;
+//     }
+//   }
+
+//   // By construction, basis_vectors is linearly independent. Because we have
+//   // checked each direction in the ambient space, it will also span the other
+//   // convex set, so we now have its affine hull.
+//   *this = AffineSubspace(basis.leftCols(affine_dimension), translation);
+// }
 
 AffineSubspace::~AffineSubspace() = default;
 
