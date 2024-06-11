@@ -30,8 +30,7 @@ std::map<BodyIndex, JointIndex> GetBodyToJointMap(
   // First loop through each joint, stores the map from the child body to the
   // joint.
   std::map<BodyIndex, JointIndex> body_to_joint_map;
-  for (JointIndex joint_index{0}; joint_index < plant.num_joints();
-       ++joint_index) {
+  for (JointIndex joint_index : plant.GetJointIndices()) {
     body_to_joint_map.emplace(plant.get_joint(joint_index).child_body().index(),
                               joint_index);
   }
@@ -106,7 +105,7 @@ GlobalInverseKinematics::GlobalInverseKinematics(
     const string body_R_name = body.name() + "_R";
     const string body_pos_name = body.name() + "_pos";
     p_WBo_[body_idx] = prog_.NewContinuousVariables<3>(body_pos_name);
-    if (weld_to_world_body_index_set.count(body_idx) > 0) {
+    if (weld_to_world_body_index_set.contains(body_idx)) {
       // This body is welded to the world.
       R_WB_[body_idx] = prog_.NewContinuousVariables<3, 3>(body_R_name);
     } else {
@@ -120,7 +119,7 @@ GlobalInverseKinematics::GlobalInverseKinematics(
     const RigidBody<double>& body = plant_.get_body(body_idx);
     // If the body is fixed to the world, then fix the decision variables on
     // the body position and orientation.
-    if (weld_to_world_body_index_set.count(body_idx) > 0) {
+    if (weld_to_world_body_index_set.contains(body_idx)) {
       // This body is welded to the world.
       const math::RigidTransformd X_WB = plant_.CalcRelativeTransform(
           *dummy_plant_context, plant_.world_frame(), body.body_frame());
@@ -275,7 +274,7 @@ void GlobalInverseKinematics::ReconstructGeneralizedPositionSolutionForBody(
   auto dummy_plant_context = plant_.CreateDefaultContext();
   const Joint<double>& joint = plant_.get_joint(body_to_joint_map.at(body_idx));
   const RigidBody<double>& parent = joint.parent_body();
-  if (weld_to_world_body_index_set.count(body_idx) == 0) {
+  if (!weld_to_world_body_index_set.contains(body_idx)) {
     // R_WP is the rotation matrix of parent frame to the world frame.
     const Matrix3d& R_WP = reconstruct_R_WB->at(parent.index());
     const RigidTransformd X_PJp =
@@ -626,8 +625,7 @@ void GlobalInverseKinematics::AddJointLimitConstraint(
         "the bounds on R_WB and p_WB directly.");
   }
   const Joint<double>* joint{nullptr};
-  for (JointIndex joint_index{0}; joint_index < plant_.num_joints();
-       ++joint_index) {
+  for (JointIndex joint_index : plant_.GetJointIndices()) {
     if (plant_.get_joint(joint_index).child_body().index() == body_index) {
       joint = &(plant_.get_joint(joint_index));
       break;
@@ -778,7 +776,7 @@ void GlobalInverseKinematics::AddJointLimitConstraint(
             // This dummy_plant_context is used to compute the pose of a body
             // welded to the world.
             auto dummy_plant_context = plant_.CreateDefaultContext();
-            if (weld_to_world_body_index_set.count(BodyIndex{parent_idx}) > 0) {
+            if (weld_to_world_body_index_set.contains(BodyIndex{parent_idx})) {
               const RigidTransformd X_WP = plant_.CalcRelativeTransform(
                   *dummy_plant_context, plant_.world_frame(),
                   plant_.get_body(BodyIndex{parent_idx}).body_frame());

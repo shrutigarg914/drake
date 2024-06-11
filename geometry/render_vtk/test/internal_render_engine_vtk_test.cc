@@ -717,6 +717,22 @@ TEST_F(RenderEngineVtkTest, GltfAssetFormats) {
   }
 }
 
+TEST_F(RenderEngineVtkTest, GltfUnsupportedExtensionRequired) {
+  const RigidTransformd X_WC;
+  Init(X_WC);
+
+  PerceptionProperties material;
+  material.AddProperty("label", "id", RenderLabel(1));
+  const GeometryId id = GeometryId::get_new_id();
+  const std::string filename = FindResourceOrThrow(
+      "drake/geometry/render/test/meshes/basisu_required.gltf");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      renderer_->RegisterVisual(id, Mesh(filename), material,
+                                RigidTransformd::Identity(),
+                                false /* needs update */),
+      ".*KHR_texture_basisu is required.*");
+}
+
 // Primitives result in a geometry with a single Part. However, we can load
 // meshes from .gltf or .obj files that will create multiple parts. The meshes
 // in this test are conceptually identical: a cube with different colors on each
@@ -877,20 +893,15 @@ TEST_F(RenderEngineVtkTest, VtkGltfBehavior) {
   }
 }
 
-// Confirms that meshes/convex referencing a file with an unsupported extension
-// are ignored. (There's also an untested one-time warning.)
-TEST_F(RenderEngineVtkTest, UnsupportedMeshConvex) {
+// Confirms that Mesh declarations referencing a file with an unsupported
+// extension are ignored. (There's also an untested one-time warning.)
+TEST_F(RenderEngineVtkTest, UnsupportedMesh) {
   Init(X_WC_, false);
   const PerceptionProperties material = simple_material();
   const GeometryId id = GeometryId::get_new_id();
 
   const Mesh mesh("invalid.fbx");
   EXPECT_FALSE(renderer_->RegisterVisual(id, mesh, material,
-                                         RigidTransformd::Identity(),
-                                         false /* needs update */));
-
-  const Convex convex("invalid.fbx");
-  EXPECT_FALSE(renderer_->RegisterVisual(id, convex, material,
                                          RigidTransformd::Identity(),
                                          false /* needs update */));
 }
@@ -2207,11 +2218,12 @@ double AddShapeRows(RenderEngineVtk* render_engine,
   register_visual(GeometryId::get_new_id(), capsule, texture_material(),
                   Vector3d{x, row2, 0});
 
-  // Convex is treated the same as Mesh. We'll put a token convex shape in, but
-  // do the rigorous testing on Mesh below.
+  // A non-convex shape should be replaced by its convex hull. It doesn't take
+  // a texture, so we don't need a texture variant.
   x -= 0.15;
   const Convex convex(
-      FindResourceOrThrow("drake/geometry/render/test/meshes/box_no_mtl.obj"),
+      FindResourceOrThrow(
+          "drake/examples/scene_graph/cuboctahedron_with_hole.obj"),
       0.05);
   register_visual(GeometryId::get_new_id(), convex,
                   diffuse_material(Rgba(0.8, 0.25, 0.8)), Vector3d{x, row1, 0});

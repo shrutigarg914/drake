@@ -1059,9 +1059,15 @@ class TestMathematicalProgram(unittest.TestCase):
     def test_add_l2norm_cost(self):
         prog = mp.MathematicalProgram()
         x = prog.NewContinuousVariables(2, 'x')
-        prog.AddL2NormCost(
-            A=np.array([[1, 2.], [3., 4]]), b=np.array([1., 2.]), vars=x)
+        A = np.array([[1, 2.], [3., 4]])
+        b = np.array([1., 2.])
+        prog.AddL2NormCost(A=A, b=b, vars=x)
         self.assertEqual(len(prog.l2norm_costs()), 1)
+        prog.AddL2NormCost(
+            e=np.linalg.norm(A@x+b), psd_tol=1e-8, coefficient_tol=1e-8)
+        self.assertEqual(len(prog.l2norm_costs()), 2)
+        prog.AddCost(e=np.linalg.norm(A@x+b))
+        self.assertEqual(len(prog.l2norm_costs()), 3)
 
     def test_add_l2norm_cost_using_conic_constraint(self):
         prog = mp.MathematicalProgram()
@@ -1363,6 +1369,14 @@ class TestMathematicalProgram(unittest.TestCase):
         scaling = prog.GetVariableScaling()
         self.assertEqual(len(scaling), 0)
 
+    def test_remove_decision_variable(self):
+        prog = mp.MathematicalProgram()
+        x = prog.NewContinuousVariables(3)
+        x1_index = prog.FindDecisionVariableIndex(x[1])
+        x1_index_removed = prog.RemoveDecisionVariable(x[1])
+        self.assertEqual(x1_index, x1_index_removed)
+        self.assertEqual(prog.num_vars(), 2)
+
     def test_remove_cost(self):
         prog = mp.MathematicalProgram()
         x = prog.NewContinuousVariables(3)
@@ -1450,6 +1464,15 @@ class TestMathematicalProgram(unittest.TestCase):
             np.eye(3), np.ones((3,)), x)
         prog.RemoveConstraint(constraint=lcp_con)
         self.assertEqual(len(prog.linear_complementarity_constraints()), 0)
+
+    def test_remove_visualization_callback(self):
+        prog = mp.MathematicalProgram()
+        x = prog.NewContinuousVariables(3)
+        callback = prog.AddVisualizationCallback(
+            lambda x_val: print(x_val[0]), x)
+        count = prog.RemoveVisualizationCallback(callback=callback)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(prog.visualization_callbacks()), 0)
 
     def test_get_program_type(self):
         prog = mp.MathematicalProgram()

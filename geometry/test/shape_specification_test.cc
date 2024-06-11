@@ -7,6 +7,7 @@
 
 #include "drake/common/find_resource.h"
 #include "drake/common/fmt_eigen.h"
+#include "drake/common/overloaded.h"
 #include "drake/common/test_utilities/eigen_matrix_compare.h"
 #include "drake/common/test_utilities/expect_no_throw.h"
 #include "drake/common/test_utilities/expect_throws_message.h"
@@ -251,6 +252,49 @@ TEST_F(ReifierTest, CloningShapes) {
   ASSERT_FALSE(ellipsoid_made_);
   EXPECT_FALSE(mesh_made_);
   ASSERT_TRUE(sphere_made_);
+}
+
+GTEST_TEST(VisitTest, ReturnTypeVoid) {
+  const Box box(1.0, 2.0, 3.0);
+  box.Visit(overloaded{
+      [&](const Box& arg) {
+        EXPECT_EQ(&arg, &box);
+      },
+      [](const auto&) {
+        GTEST_FAIL();
+      },
+  });
+
+  const Sphere sphere(1.0);
+  sphere.Visit(overloaded{
+      [&](const Sphere& arg) {
+        EXPECT_EQ(&arg, &sphere);
+      },
+      [](const auto&) {
+        GTEST_FAIL();
+      },
+  });
+}
+
+GTEST_TEST(VisitTest, ReturnTypeConversion) {
+  const Box box(1.0, 2.0, 3.0);
+  const Sphere sphere(1.0);
+
+  auto get_size = overloaded{
+      [](const Box& arg) {
+        return arg.size();
+      },
+      [](const Sphere& arg) {
+        return Vector1d(arg.radius());
+      },
+      [](const auto&) -> Eigen::VectorXd {
+        DRAKE_UNREACHABLE();
+      },
+  };
+
+  Eigen::VectorXd dims;
+  dims = box.Visit<Eigen::VectorXd>(get_size);
+  dims = sphere.Visit<Eigen::VectorXd>(get_size);
 }
 
 // Given the pose of a plane and its expected translation and z-axis, confirms
@@ -534,6 +578,27 @@ GTEST_TEST(ShapeTest, NumericalValidation) {
   DRAKE_EXPECT_NO_THROW(Sphere(0));  // Special case for 0 radius.
 }
 
+// Confirms that Convex and Mesh can report their convex hull.
+GTEST_TEST(ShapeTest, ConvexHull) {
+  const std::string cube_path =
+      FindResourceOrThrow("drake/geometry/test/quad_cube.obj");
+
+  auto expect_convex_hull = [](const auto& mesh_like) {
+    SCOPED_TRACE(
+        fmt::format("Testing convex hull for {}.", mesh_like.type_name()));
+    using MeshType = decltype(mesh_like);
+    // First call should work for a valid mesh file name.
+    const PolygonSurfaceMesh<double>& hull = mesh_like.GetConvexHull();
+    // Subsequent calls return references to the same value.
+    EXPECT_EQ(&hull, &mesh_like.GetConvexHull());
+    const MeshType mesh2(mesh_like);
+    // Copies of the mesh share the same hull.
+    EXPECT_EQ(&mesh2.GetConvexHull(), &hull);
+  };
+  expect_convex_hull(Mesh(cube_path));
+  expect_convex_hull(Convex(cube_path));
+}
+
 class DefaultReifierTest : public ShapeReifier, public ::testing::Test {};
 
 // Tests default implementation of virtual functions for each shape.
@@ -635,59 +700,6 @@ GTEST_TEST(ShapeTest, TypeNameAndToString) {
   EXPECT_EQ(base.to_string(), "Box(width=1.5, depth=2.5, height=3.5)");
   EXPECT_EQ(fmt::to_string(base), "Box(width=1.5, depth=2.5, height=3.5)");
 }
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-GTEST_TEST(ShapeName, SimpleReification) {
-  ShapeName name;
-
-  EXPECT_EQ(name.name(), "");
-
-  Box(1, 2, 3).Reify(&name);
-  EXPECT_EQ(name.name(), "Box");
-
-  Capsule(1, 2).Reify(&name);
-  EXPECT_EQ(name.name(), "Capsule");
-
-  Convex("filepath", 1.0).Reify(&name);
-  EXPECT_EQ(name.name(), "Convex");
-
-  Cylinder(1, 2).Reify(&name);
-  EXPECT_EQ(name.name(), "Cylinder");
-
-  Ellipsoid(1, 2, 3).Reify(&name);
-  EXPECT_EQ(name.name(), "Ellipsoid");
-
-  HalfSpace().Reify(&name);
-  EXPECT_EQ(name.name(), "HalfSpace");
-
-  Mesh("filepath", 1.0).Reify(&name);
-  EXPECT_EQ(name.name(), "Mesh");
-
-  MeshcatCone(1.0, 0.25, 0.5).Reify(&name);
-  EXPECT_EQ(name.name(), "MeshcatCone");
-
-  Sphere(0.5).Reify(&name);
-  EXPECT_EQ(name.name(), "Sphere");
-}
-GTEST_TEST(ShapeName, ReifyOnConstruction) {
-  EXPECT_EQ(ShapeName(Box(1, 2, 3)).name(), "Box");
-  EXPECT_EQ(ShapeName(Capsule(1, 2)).name(), "Capsule");
-  EXPECT_EQ(ShapeName(Convex("filepath", 1.0)).name(), "Convex");
-  EXPECT_EQ(ShapeName(Cylinder(1, 2)).name(), "Cylinder");
-  EXPECT_EQ(ShapeName(Ellipsoid(1, 2, 3)).name(), "Ellipsoid");
-  EXPECT_EQ(ShapeName(HalfSpace()).name(), "HalfSpace");
-  EXPECT_EQ(ShapeName(Mesh("filepath", 1.0)).name(), "Mesh");
-  EXPECT_EQ(ShapeName(Sphere(0.5)).name(), "Sphere");
-}
-GTEST_TEST(ShapeName, Streaming) {
-  ShapeName name(Sphere(0.5));
-  std::stringstream ss;
-  ss << name;
-  EXPECT_EQ(name.name(), "Sphere");
-  EXPECT_EQ(ss.str(), name.name());
-}
-#pragma GCC diagnostic pop
 
 GTEST_TEST(ShapeTest, Volume) {
   EXPECT_NEAR(CalcVolume(Box(1, 2, 3)), 6.0, 1e-14);

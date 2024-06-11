@@ -41,7 +41,7 @@ constexpr double kPoissonsRatio = 0.4;      // unitless.
 constexpr double kMassDensity = 1e3;        // unit: kg/m³
 constexpr double kStiffnessDamping = 0.01;  // unit: s
 /* Time step (seconds). */
-constexpr double kDt = 1e-2;
+constexpr double kDt = 2.5e-3;
 /* Contact parameters. */
 const double kSlopeAngle = M_PI / 12.0;  // unit: radian
 /* The friction coefficient has to be greater than or equal to tan(θ) to hold
@@ -101,7 +101,7 @@ class DeformableIntegrationTest : public ::testing::Test {
     /* Connect visualizer. Useful for when this test is used for debugging. */
     geometry::DrakeVisualizerd::AddToBuilder(&builder, *scene_graph_);
 
-    builder.Connect(model_->vertex_positions_port(),
+    builder.Connect(plant_->get_deformable_body_configuration_output_port(),
                     scene_graph_->get_source_configuration_port(
                         plant_->get_source_id().value()));
 
@@ -170,7 +170,7 @@ namespace {
 TEST_F(DeformableIntegrationTest, SteadyState) {
   Simulator<double> simulator(*diagram_);
   /* Run simulation for long enough to reach steady state. */
-  simulator.AdvanceTo(5.0);
+  simulator.AdvanceTo(2.0);
 
   /* Verify the system has reached steady state. */
   const Context<double>& diagram_context = simulator.get_context();
@@ -179,7 +179,7 @@ TEST_F(DeformableIntegrationTest, SteadyState) {
   const FemState<double>& fem_state =
       EvalFemState(plant_context, DeformableBodyIndex(0));
   constexpr double kVelocityThreshold = 2e-5;      // unit: m/s.
-  constexpr double kAccelerationThreshold = 1e-6;  // unit: m/s².
+  constexpr double kAccelerationThreshold = 2e-6;  // unit: m/s².
   const VectorXd& v = fem_state.GetVelocities();
   EXPECT_TRUE(CompareMatrices(v, VectorXd::Zero(v.size()), kVelocityThreshold));
   const VectorXd& a = fem_state.GetAccelerations();
@@ -224,7 +224,7 @@ TEST_F(DeformableIntegrationTest, SteadyState) {
   F_Ac_W_expected.SetZero();
   GeometryId deformable_geometry_id = model_->GetGeometryId(body_id_);
   const VectorXd& vertex_positions =
-      model_->vertex_positions_port()
+      plant_->get_deformable_body_configuration_output_port()
           .template Eval<geometry::GeometryConfigurationVector<double>>(
               plant_context)
           .value(deformable_geometry_id);

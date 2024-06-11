@@ -66,14 +66,6 @@ SapDriver<T>::SapDriver(const CompliantContactManager<T>* manager,
     : manager_(manager), near_rigid_threshold_(near_rigid_threshold) {
   DRAKE_DEMAND(manager != nullptr);
   DRAKE_DEMAND(near_rigid_threshold >= 0.0);
-  // Collect joint damping coefficients into a vector.
-  joint_damping_ = VectorX<T>::Zero(plant().num_velocities());
-  for (JointIndex j(0); j < plant().num_joints(); ++j) {
-    const Joint<T>& joint = plant().get_joint(j);
-    const int velocity_start = joint.velocity_start();
-    const int nv = joint.num_velocities();
-    joint_damping_.segment(velocity_start, nv) = joint.damping_vector();
-  }
 }
 
 template <typename T>
@@ -146,7 +138,7 @@ void SapDriver<T>::CalcLinearDynamicsMatrix(const systems::Context<T>& context,
   // external actuation, evaluated at the previous state x₀.
   // The dynamics matrix is defined as:
   //   A = ∂m/∂v = (M + dt⋅D)
-  M.diagonal() += plant().time_step() * joint_damping_;
+  M.diagonal() += plant().time_step() * plant().EvalJointDampingCache(context);
 
   for (TreeIndex t(0); t < tree_topology().num_trees(); ++t) {
     const int tree_start_in_v = tree_topology().tree_velocities_start_in_v(t);
@@ -224,15 +216,7 @@ std::vector<RotationMatrix<T>> SapDriver<T>::AddContactConstraints(
     const T damping = pair.damping;
     const T friction = pair.friction_coefficient;
     const auto& jacobian_blocks = pair.jacobian;
-
-    // Stiffness equal to infinity is used to indicate a rigid contact. Since
-    // SAP is inherently compliant, we must use the "near rigid regime"
-    // approximation, with near rigid parameter equal to 1.0.
-    // TODO(amcastrot-tri): This is mostly for deformables, consider exposing
-    // this parameter.
-    const double beta = (stiffness == std::numeric_limits<double>::infinity())
-                            ? 1.0
-                            : near_rigid_threshold_;
+    const double beta = near_rigid_threshold_;
 
     auto make_sap_parameters = [&]() {
       return typename SapFrictionConeConstraint<T>::Parameters{
@@ -267,16 +251,8 @@ std::vector<RotationMatrix<T>> SapDriver<T>::AddContactConstraints(
             MakeContactConfiguration(pair), std::move(J),
             make_sap_parameters()));
       } else {
-        ContactConfiguration<T> contact_configuration =
-            MakeContactConfiguration(pair);
-        DRAKE_DEMAND(
-            !std::isnan(ExtractDoubleOrThrow(contact_configuration.vn)));
-        DRAKE_DEMAND(
-            !std::isnan(ExtractDoubleOrThrow(contact_configuration.fe)));
-        DRAKE_DEMAND(
-            !std::isnan(ExtractDoubleOrThrow(contact_configuration.phi)));
         problem->AddConstraint(std::make_unique<SapHuntCrossleyConstraint<T>>(
-            std::move(contact_configuration), std::move(J),
+            MakeContactConfiguration(pair), std::move(J),
             make_hunt_crossley_parameters()));
       }
     } else {
@@ -333,8 +309,7 @@ void SapDriver<T>::AddLimitConstraints(const systems::Context<T>& context,
   const double stiffness = 1.0e12;
   const double dissipation_time_scale = dt;
 
-  for (JointIndex joint_index(0); joint_index < plant().num_joints();
-       ++joint_index) {
+  for (JointIndex joint_index : plant().GetJointIndices()) {
     const Joint<T>& joint = plant().get_joint(joint_index);
     // We only support limits for 1 DOF joints for which we know that q̇ = v.
     if (joint.num_positions() == 1 && joint.num_velocities() == 1) {
@@ -735,15 +710,15 @@ void SapDriver<T>::AddPdControllerConstraints(
   if (plant().num_actuators() == 0) return;
 
   // Desired positions & velocities.
-  const int num_actuators = plant().num_actuators();
+  const int num_actuated_dofs = plant().num_actuated_dofs();
+
   // TODO(amcastro-tri): makes these EvalFoo() instead to avoid heap
   // allocations.
   const VectorX<T> desired_state = manager_->AssembleDesiredStateInput(context);
   const VectorX<T> feed_forward_actuation =
       manager_->AssembleActuationInput(context);
 
-  for (JointActuatorIndex actuator_index(0);
-       actuator_index < plant().num_actuators(); ++actuator_index) {
+  for (JointActuatorIndex actuator_index : plant().GetJointActuatorIndices()) {
     const JointActuator<T>& actuator =
         plant().get_joint_actuator(actuator_index);
     if (actuator.has_controller()) {
@@ -753,9 +728,9 @@ void SapDriver<T>::AddPdControllerConstraints(
       // controllers on locked joints is considered to be zero.
       if (!joint.is_locked(context)) {
         const double effort_limit = actuator.effort_limit();
-        const T& qd = desired_state[actuator.index()];
-        const T& vd = desired_state[num_actuators + actuator.index()];
-        const T& u0 = feed_forward_actuation[actuator.index()];
+        const T& qd = desired_state[actuator.input_start()];
+        const T& vd = desired_state[num_actuated_dofs + actuator.input_start()];
+        const T& u0 = feed_forward_actuation[actuator.input_start()];
 
         const T& q0 = joint.GetOnePosition(context);
         const int dof = joint.velocity_start();
@@ -1004,12 +979,12 @@ void SapDriver<T>::CalcSapSolverResults(
         "  3. Numerical ill conditioning of the model caused by, for instance, "
         "     extremely large mass ratios. Revise your model and consider "
         "     whether very small objects can be removed or welded to larger "
-        "     objects in the model."
+        "     objects in the model.\n"
         "  4. Ill-conditioning could be alleviated via SAP's near rigid "
         "     parameter. Refer to "
-        "     MultibodyPlant::set_sap_near_rigid_threshold() for details."
+        "     MultibodyPlant::set_sap_near_rigid_threshold() for details.\n"
         "  5. Some other cause. You may want to use Stack Overflow (#drake "
-        "     tag) to request some assistance.",
+        "     tag) to request some assistance.\n",
         context.get_time());
     throw std::runtime_error(msg);
   }
@@ -1118,8 +1093,7 @@ void SapDriver<T>::CalcActuation(const systems::Context<T>& context,
 
   // Map generalized forces to actuation indexing.
   int constraint_index = start;
-  for (JointActuatorIndex actuator_index(0);
-       actuator_index < plant().num_actuators(); ++actuator_index) {
+  for (JointActuatorIndex actuator_index : plant().GetJointActuatorIndices()) {
     const JointActuator<T>& actuator =
         plant().get_joint_actuator(actuator_index);
     const Joint<T>& joint = actuator.joint();
@@ -1135,7 +1109,7 @@ void SapDriver<T>::CalcActuation(const systems::Context<T>& context,
       DRAKE_DEMAND(c.num_constraint_equations() == 1);
 
       // Each actuator defines a single PD controller.
-      actuation->coeffRef(actuator_index) = tau_pd(dof);
+      actuation->coeffRef(actuator.input_start()) = tau_pd(dof);
     }
   }
   // Sanity check consistency with the code that added the constraints,

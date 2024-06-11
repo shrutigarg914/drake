@@ -32,8 +32,6 @@ using render::RenderCameraCore;
 using render::RenderEngine;
 using render_vtk::internal::ImageType;
 using render_vtk::internal::RenderEngineVtk;
-using systems::sensors::ColorD;
-using systems::sensors::ColorI;
 using systems::sensors::ImageDepth32F;
 using systems::sensors::ImageLabel16I;
 using systems::sensors::ImageRgba8U;
@@ -525,7 +523,7 @@ void RenderEngineGltfClient::DoUpdateVisualPose(
 }
 
 bool RenderEngineGltfClient::DoRemoveGeometry(GeometryId id) {
-  if (gltfs_.count(id) == 1) {
+  if (gltfs_.contains(id)) {
     gltfs_.erase(id);
     return true;
   } else {
@@ -573,7 +571,7 @@ bool RenderEngineGltfClient::ImplementGltf(
   std::map<int, Matrix4<double>> root_nodes = FindRootNodes(mesh_data);
   SetRootPoses(&mesh_data, root_nodes, data.X_WG, scale, true);
 
-  DRAKE_DEMAND(gltfs_.count(data.id) == 0);
+  DRAKE_DEMAND(!gltfs_.contains(data.id));
   gltfs_.insert({data.id,
                  {gltf_path, std::move(mesh_data), std::move(root_nodes), scale,
                   GetRenderLabelOrThrow(data.properties)}});

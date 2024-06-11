@@ -94,6 +94,23 @@ GTEST_TEST(TestConstraint, LinearConstraintSparse) {
   EXPECT_TRUE(CompareMatrices(dut.upper_bound(), ub));
 }
 
+GTEST_TEST(TestConstraint, LinearConstraintInfiniteEntries) {
+  std::vector<Eigen::Triplet<double>> A_triplets;
+  A_triplets.emplace_back(0, 1, 0.5);
+  A_triplets.emplace_back(1, 0, 1.5);
+  A_triplets.emplace_back(2, 0, kInf);
+  Eigen::SparseMatrix<double> A_sparse_bad(3, 3);
+  Eigen::Vector3d lb(0, 1, -2);
+  Eigen::Vector3d ub(1, 2, 3);
+  A_sparse_bad.setFromTriplets(A_triplets.begin(), A_triplets.end());
+  Eigen::Vector2d bound(0, 1);
+  Eigen::Vector3d bound_bad(0, 1, kInf);
+  DRAKE_EXPECT_THROWS_MESSAGE(LinearConstraint(A_sparse_bad, lb, ub),
+                              ".*IsFinite().*");
+  DRAKE_EXPECT_THROWS_MESSAGE(LinearConstraint(A_sparse_bad.toDense(), lb, ub),
+                              ".*allFinite().*");
+}
+
 GTEST_TEST(TestConstraint, LinearEqualityConstraintSparse) {
   std::vector<Eigen::Triplet<double>> A_triplets;
   A_triplets.emplace_back(0, 1, 0.5);
@@ -113,6 +130,31 @@ GTEST_TEST(TestConstraint, LinearEqualityConstraintSparse) {
   EXPECT_TRUE(dut.is_dense_A_constructed());
   EXPECT_TRUE(CompareMatrices(dut.lower_bound(), bound));
   EXPECT_TRUE(CompareMatrices(dut.upper_bound(), bound));
+}
+
+GTEST_TEST(TestConstraint, LinearEqualityConstraintInfiniteEntries) {
+  std::vector<Eigen::Triplet<double>> A_triplets;
+  A_triplets.emplace_back(0, 1, 0.5);
+  A_triplets.emplace_back(1, 0, 1.5);
+  Eigen::SparseMatrix<double> A_sparse(2, 3);
+  A_sparse.setFromTriplets(A_triplets.begin(), A_triplets.end());
+  Eigen::SparseMatrix<double> A_sparse_bad(3, 3);
+  A_triplets.emplace_back(2, 0, kInf);
+  A_sparse_bad.setFromTriplets(A_triplets.begin(), A_triplets.end());
+  Eigen::Vector2d bound(0, 1);
+  Eigen::Vector3d bound_bad(0, 1, kInf);
+  EXPECT_THROW(LinearEqualityConstraint(A_sparse_bad, bound), std::exception);
+  EXPECT_THROW(LinearEqualityConstraint(A_sparse, bound_bad), std::exception);
+  EXPECT_THROW(LinearEqualityConstraint(A_sparse_bad.toDense(), bound),
+               std::exception);
+  EXPECT_THROW(LinearEqualityConstraint(A_sparse.toDense(), bound_bad),
+               std::exception);
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      LinearEqualityConstraint(A_sparse.toDense().row(0), kInf),
+      ".*allFinite().*");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      LinearEqualityConstraint(A_sparse_bad.toDense().row(2), 0),
+      ".*allFinite().*");
 }
 
 GTEST_TEST(TestConstraint, testLinearConstraintUpdate) {
@@ -151,6 +193,26 @@ GTEST_TEST(TestConstraint, testLinearConstraintUpdate) {
   EXPECT_TRUE(CompareMatrices(constraint.GetDenseA(), A3));
   EXPECT_TRUE(CompareMatrices(constraint.get_sparse_A().toDense(), A3));
   EXPECT_EQ(constraint.num_constraints(), 3);
+}
+
+GTEST_TEST(TestConstraint, testLinearConstraintUpdateErrors) {
+  // Update the coefficients or the bound of the linear constraint, and check
+  // the updated constraint.
+  const Eigen::Matrix2d A = Eigen::Matrix2d::Identity();
+  Eigen::Matrix2d A_bad = Eigen::Matrix2d::Identity();
+  A_bad(0, 1) = kInf;
+  const Eigen::Vector2d b(1, 2);
+  const Eigen::Vector2d b_bad(0, kInf);
+  LinearEqualityConstraint constraint(A, b);
+  EXPECT_TRUE(CompareMatrices(constraint.lower_bound(), b));
+  EXPECT_TRUE(CompareMatrices(constraint.upper_bound(), b));
+  EXPECT_TRUE(CompareMatrices(constraint.GetDenseA(), A));
+  EXPECT_EQ(constraint.num_constraints(), 2);
+
+  EXPECT_THROW(constraint.UpdateCoefficients(A_bad, b), std::exception);
+  EXPECT_THROW(constraint.UpdateCoefficients(A_bad.sparseView(), b),
+               std::exception);
+  EXPECT_THROW(constraint.UpdateCoefficients(A, b_bad), std::exception);
 }
 
 GTEST_TEST(testConstraint, testRemoveTinyCoefficient) {
@@ -257,6 +319,34 @@ GTEST_TEST(testConstraint, testQuadraticConstraintHessian) {
   // Construct a constraint with psd Hessian and lower bound being -inf.
   QuadraticConstraint constraint3(Eigen::Matrix2d::Identity(), b, -kInf, 1);
   EXPECT_TRUE(constraint3.is_convex());
+}
+
+GTEST_TEST(testConstraint, QudraticConstraintLDLtFailute) {
+  Eigen::Matrix2d Q;
+  Eigen::Vector2d b;
+  // This matrix has eigenvalues 0.5 and -0.5 and so is indefinite. However, if
+  // we use Eigen's LDLT to determine the definiteness of this matrix, the
+  // LDLT construction fails due to numerical issues.
+  // clang-format off
+  Q << 0, 0.5,
+       0.5, 0;
+  // clang-format on
+  b << 0, 0;
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_solver;
+  ldlt_solver.compute(Q);
+  // Check that the LDLT solver fails. If Eigen were to update in such a way
+  // that the LDLT construction were to succeed, then this test would become
+  // irrelevant and thus we could either remove it, or would need to find a new
+  // Q matrix which causes the LDLT to fail.
+  EXPECT_EQ(ldlt_solver.info(), Eigen::NumericalIssue);
+
+  // The construction of the constraint calls UpdateHessian() which currently
+  // calls Eigen's LDLT solver which fails on this simplex example.
+  QuadraticConstraint constraint(Q, b, -kInf, 1);
+  EXPECT_FALSE(constraint.is_convex());
+  EXPECT_EQ(constraint.hessian_type(),
+            QuadraticConstraint::HessianType::kIndefinite);
 }
 
 void TestLorentzConeEvalConvex(const Eigen::Ref<const Eigen::MatrixXd>& A,
@@ -599,6 +689,10 @@ GTEST_TEST(testConstraint, testLinearMatrixInequalityConstraint) {
   Eigen::Matrix2d F2;
   F2 << 1, 2, 2, 1;
   LinearMatrixInequalityConstraint cnstr({F0, F1, F2});
+
+  EXPECT_TRUE(CompareMatrices(cnstr.F()[0], F0));
+  EXPECT_TRUE(CompareMatrices(cnstr.F()[1], F1));
+  EXPECT_TRUE(CompareMatrices(cnstr.F()[2], F2));
 
   // [4, 3]
   // [3, 4] is positive semidefinite

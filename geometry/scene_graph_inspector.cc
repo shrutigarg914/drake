@@ -62,6 +62,12 @@ int SceneGraphInspector<T>::NumGeometriesWithRole(Role role) const {
 }
 
 template <typename T>
+int SceneGraphInspector<T>::NumDeformableGeometriesWithRole(Role role) const {
+  DRAKE_DEMAND(state_ != nullptr);
+  return state_->NumDeformableGeometriesWithRole(role);
+}
+
+template <typename T>
 int SceneGraphInspector<T>::NumDynamicGeometries() const {
   DRAKE_DEMAND(state_ != nullptr);
   return state_->NumDynamicGeometries();
@@ -264,6 +270,14 @@ const VolumeMesh<double>* SceneGraphInspector<T>::GetReferenceMesh(
 }
 
 template <typename T>
+const std::vector<internal::RenderMesh>&
+SceneGraphInspector<T>::GetDrivenRenderMeshes(GeometryId geometry_id,
+                                              Role role) const {
+  DRAKE_DEMAND(state_ != nullptr);
+  return state_->GetDrivenRenderMeshes(geometry_id, role);
+}
+
+template <typename T>
 bool SceneGraphInspector<T>::IsDeformableGeometry(GeometryId id) const {
   return state_->IsDeformableGeometry(id);
 }
@@ -275,17 +289,16 @@ std::vector<GeometryId> SceneGraphInspector<T>::GetAllDeformableGeometryIds()
 }
 
 template <typename T>
+const PolygonSurfaceMesh<double>* SceneGraphInspector<T>::GetConvexHull(
+    GeometryId geometry_id) const {
+  return state_->GetConvexHull(geometry_id);
+}
+
+template <typename T>
 bool SceneGraphInspector<T>::CollisionFiltered(GeometryId geometry_id1,
                                                GeometryId geometry_id2) const {
   DRAKE_DEMAND(state_ != nullptr);
   return state_->CollisionFiltered(geometry_id1, geometry_id2);
-}
-
-template <typename T>
-void SceneGraphInspector<T>::Reify(GeometryId geometry_id,
-                                   ShapeReifier* reifier) const {
-  DRAKE_DEMAND(state_ != nullptr);
-  state_->GetShape(geometry_id).Reify(reifier);
 }
 
 template <typename T>

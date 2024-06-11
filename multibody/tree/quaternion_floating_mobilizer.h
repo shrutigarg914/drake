@@ -19,13 +19,15 @@ namespace internal {
 // This Mobilizer allows two frames to move freely relatively to one another.
 // To fully specify this mobilizer a user must provide an inboard frame F and
 // an outboard frame M. This mobilizer introduces six degrees of freedom which
-// allow frame M to freely move with respect to frame F. This mobilizer
-// introduces four generalized positions to describe the orientation `R_FM` of
-// frame M in F with a quaternion `q_FM`, and three generalized positions to
-// describe the position of frame M's origin in F with a position vector
-// `p_FM`. As generalized velocities, this mobilizer introduces the angular
-// velocity `w_FM` of frame M in F and the linear velocity `v_FM` of frame M's
-// origin in frame F.
+// allow frame M to freely move with respect to frame F.  This mobilizer
+// introduces four generalized positions to describe the orientation R_FM of
+// frame M in F with a quaternion q_FM, and three generalized positions to
+// describe the translation of frame M's origin in F with a position vector
+// p_FM. The seven entries of the configuration vector q are ordered
+// (q_FM, p_FM) with the quaternion, ordered wxyz (scalar then vector),
+// preceding the translation vector. As generalized velocities, this mobilizer
+// introduces the angular velocity w_FM of frame M in F and the linear
+// velocity v_FM of frame M's origin in frame F, ordered (w_FM, v_FM).
 //
 // @tparam_default_scalar
 template <typename T>
@@ -89,12 +91,12 @@ class QuaternionFloatingMobilizer final : public MobilizerImpl<T, 7, 6> {
   // @param[in] q_FM
   //   The desired orientation of M in F to be stored in `context`.
   // @returns a constant reference to `this` mobilizer.
-  const QuaternionFloatingMobilizer<T>& set_quaternion(
+  const QuaternionFloatingMobilizer<T>& SetQuaternion(
       systems::Context<T>* context, const Quaternion<T>& q_FM) const;
 
-  // Alternative signature to set_quaternion(context, q_FM) to set `state` to
+  // Alternative signature to SetQuaternion(context, q_FM) to set `state` to
   // store the orientation of M in F given by the quaternion `q_FM`.
-  const QuaternionFloatingMobilizer<T>& set_quaternion(
+  const QuaternionFloatingMobilizer<T>& SetQuaternion(
       const systems::Context<T>& context,
       const Quaternion<T>& q_FM, systems::State<T>* state) const;
 
@@ -111,12 +113,12 @@ class QuaternionFloatingMobilizer final : public MobilizerImpl<T, 7, 6> {
   // @param[in] p_FM
   //   The desired position of frame M in F to be stored in `context`.
   // @returns a constant reference to `this` mobilizer.
-  const QuaternionFloatingMobilizer<T>& set_translation(
+  const QuaternionFloatingMobilizer<T>& SetTranslation(
       systems::Context<T>* context, const Vector3<T>& p_FM) const;
 
-  // Alternative signature to set_translation(context, p_FM) to set `state` to
+  // Alternative signature to SetTranslation(context, p_FM) to set `state` to
   // store the position `p_FM` of M in F.
-  const QuaternionFloatingMobilizer<T>& set_translation(
+  const QuaternionFloatingMobilizer<T>& SetTranslation(
       const systems::Context<T>& context, const Vector3<T>& p_FM,
       systems::State<T>* state) const;
 
@@ -135,7 +137,7 @@ class QuaternionFloatingMobilizer final : public MobilizerImpl<T, 7, 6> {
   const QuaternionFloatingMobilizer<T>& SetOrientation(
       systems::Context<T>* context, const math::RotationMatrix<T>& R_FM) const {
     const Eigen::Quaternion<T> q_FM = R_FM.ToQuaternion();
-    return set_quaternion(context, q_FM);
+    return SetQuaternion(context, q_FM);
   }
 
   // Returns the angular velocity `w_FM` of frame M in F stored in `context`.
@@ -151,12 +153,12 @@ class QuaternionFloatingMobilizer final : public MobilizerImpl<T, 7, 6> {
   // @param[in] w_FM
   //   The desired angular velocity of frame M in F, expressed in F.
   // @returns a constant reference to `this` mobilizer.
-  const QuaternionFloatingMobilizer<T>& set_angular_velocity(
+  const QuaternionFloatingMobilizer<T>& SetAngularVelocity(
       systems::Context<T>* context, const Vector3<T>& w_FM) const;
 
-  // Alternative signature to set_angular_velocity(context, w_FM) to set
+  // Alternative signature to SetAngularVelocity(context, w_FM) to set
   // `state` to store the angular velocity `w_FM` of M in F.
-  const QuaternionFloatingMobilizer<T>& set_angular_velocity(
+  const QuaternionFloatingMobilizer<T>& SetAngularVelocity(
       const systems::Context<T>&, const Vector3<T>& w_FM,
       systems::State<T>* state) const;
 
@@ -177,12 +179,12 @@ class QuaternionFloatingMobilizer final : public MobilizerImpl<T, 7, 6> {
   // @param[in] v_FM
   //   The desired translational velocity of frame M in F, expressed in F.
   // @returns a constant reference to `this` mobilizer.
-  const QuaternionFloatingMobilizer<T>& set_translational_velocity(
+  const QuaternionFloatingMobilizer<T>& SetTranslationalVelocity(
       systems::Context<T>* context, const Vector3<T>& v_FM) const;
 
-  // Alternative signature to set_translational_velocity(context, v_FM) to set
+  // Alternative signature to SetTranslationalVelocity(context, v_FM) to set
   // `state` to store the translational velocity `v_FM` of M in F.
-  const QuaternionFloatingMobilizer<T>& set_translational_velocity(
+  const QuaternionFloatingMobilizer<T>& SetTranslationalVelocity(
       const systems::Context<T>&, const Vector3<T>& v_FM,
       systems::State<T>* state) const;
 

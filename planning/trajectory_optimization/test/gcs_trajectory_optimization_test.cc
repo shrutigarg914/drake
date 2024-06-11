@@ -6,6 +6,7 @@
 #include "drake/common/test_utilities/eigen_matrix_compare.h"
 #include "drake/common/test_utilities/expect_no_throw.h"
 #include "drake/common/test_utilities/expect_throws_message.h"
+#include "drake/common/trajectories/piecewise_polynomial.h"
 #include "drake/geometry/optimization/geodesic_convexity.h"
 #include "drake/geometry/optimization/graph_of_convex_sets.h"
 #include "drake/geometry/optimization/hpolyhedron.h"
@@ -18,6 +19,7 @@
 #include "drake/multibody/tree/revolute_joint.h"
 #include "drake/solvers/gurobi_solver.h"
 #include "drake/solvers/mosek_solver.h"
+#include "drake/solvers/snopt_solver.h"
 
 namespace drake {
 namespace planning {
@@ -45,15 +47,23 @@ using multibody::MultibodyPlant;
 using multibody::PlanarJoint;
 using multibody::RevoluteJoint;
 using multibody::RigidBody;
-using multibody::SpatialInertia;
 using solvers::MathematicalProgram;
 
-bool GurobiOrMosekSolverAvailable() {
-  return (solvers::MosekSolver::is_available() &&
-          solvers::MosekSolver::is_enabled()) ||
-         (solvers::GurobiSolver::is_available() &&
-          solvers::GurobiSolver::is_enabled());
+bool GurobiOrMosekSolverUnavailableDuringMemoryCheck() {
+  return (std::getenv("VALGRIND_OPTS") != nullptr) &&
+         !(solvers::MosekSolver::is_available() &&
+           solvers::MosekSolver::is_enabled() &&
+           solvers::GurobiSolver::is_available() &&
+           solvers::GurobiSolver::is_enabled());
 }
+
+bool SnoptSolverUnavailable() {
+  return !(solvers::SnoptSolver::is_available() &&
+           solvers::SnoptSolver::is_enabled());
+}
+
+// A tolerance for numerical comparisons in the tests.
+const double kTolerance = 1e-6;
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, Basic) {
   const int kDimension = 2;
@@ -71,15 +81,51 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, Basic) {
   auto& source = gcs.AddRegions(MakeConvexSets(Point(start)), 0);
   auto& target = gcs.AddRegions(MakeConvexSets(Point(goal)), 0);
 
-  gcs.AddEdges(source, regions);
-  gcs.AddEdges(regions, target);
+  // Verify that the subgraphs are present in gcs trajectory optimization.
+  auto all_subgraphs = gcs.GetSubgraphs();
+  EXPECT_NE(std::find(all_subgraphs.begin(), all_subgraphs.end(), &regions),
+            all_subgraphs.end());
+  EXPECT_NE(std::find(all_subgraphs.begin(), all_subgraphs.end(), &source),
+            all_subgraphs.end());
+  EXPECT_NE(std::find(all_subgraphs.begin(), all_subgraphs.end(), &target),
+            all_subgraphs.end());
+
+  auto& source_to_regions = gcs.AddEdges(source, regions);
+  auto& regions_to_target = gcs.AddEdges(regions, target);
+
+  // Verify that the edges between subgraphs are present in gcs trajectory
+  // optimization.
+  auto all_subgraph_edges = gcs.GetEdgesBetweenSubgraphs();
+  EXPECT_NE(std::find(all_subgraph_edges.begin(), all_subgraph_edges.end(),
+                      &source_to_regions),
+            all_subgraph_edges.end());
+  EXPECT_NE(std::find(all_subgraph_edges.begin(), all_subgraph_edges.end(),
+                      &regions_to_target),
+            all_subgraph_edges.end());
 
   auto [traj, result] = gcs.SolvePath(source, target);
   EXPECT_TRUE(result.is_success());
   EXPECT_EQ(traj.rows(), 2);
   EXPECT_EQ(traj.cols(), 1);
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
+
+  // If we would like to find another path for a different goal, we can remove
+  // the target subgraph and add a new one while keeping the remaining graph.
+  gcs.RemoveSubgraph(target);
+  Vector2d new_goal(0.5, -0.5);
+  auto& new_target = gcs.AddRegions(MakeConvexSets(Point(new_goal)), 0);
+  gcs.AddEdges(regions, new_target);
+
+  auto [new_traj, new_result] = gcs.SolvePath(source, new_target);
+  EXPECT_TRUE(new_result.is_success());
+  EXPECT_EQ(new_traj.rows(), 2);
+  EXPECT_EQ(new_traj.cols(), 1);
+  EXPECT_TRUE(CompareMatrices(new_traj.value(new_traj.start_time()), start,
+                              kTolerance));
+  EXPECT_TRUE(CompareMatrices(new_traj.value(new_traj.end_time()), new_goal,
+                              kTolerance));
 }
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, PathLengthCost) {
@@ -216,19 +262,17 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LE(gcs.EstimateComplexity(), 160);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
-
   auto [shortest_path_traj, shortest_path_result] =
       gcs.SolvePath(source, target);
   ASSERT_TRUE(shortest_path_result.is_success());
   EXPECT_EQ(shortest_path_traj.rows(), 2);
   EXPECT_EQ(shortest_path_traj.cols(), 1);
-  EXPECT_TRUE(CompareMatrices(
-      shortest_path_traj.value(shortest_path_traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(
-      shortest_path_traj.value(shortest_path_traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(shortest_path_traj.value(shortest_path_traj.start_time()),
+                      start, kTolerance));
+  EXPECT_TRUE(
+      CompareMatrices(shortest_path_traj.value(shortest_path_traj.end_time()),
+                      goal, kTolerance));
 
   // We expect the shortest path to be a straight line from S to G, going
   // through the gravel. Thus we expect the number of segments in the trajectory
@@ -246,7 +290,7 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
         (shortest_path_traj.value(t_next) - shortest_path_traj.value(t)).norm();
     shortest_path_length += dx;
   }
-  EXPECT_NEAR(shortest_path_length, kExpectedShortestPathLength, 1e-6);
+  EXPECT_NEAR(shortest_path_length, kExpectedShortestPathLength, kTolerance);
 
   const double shortest_path_duration =
       shortest_path_traj.end_time() - shortest_path_traj.start_time();
@@ -275,9 +319,9 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
   EXPECT_EQ(detour_traj.rows(), 2);
   EXPECT_EQ(detour_traj.cols(), 1);
   EXPECT_TRUE(CompareMatrices(detour_traj.value(detour_traj.start_time()),
-                              start, 1e-6));
-  EXPECT_TRUE(
-      CompareMatrices(detour_traj.value(detour_traj.end_time()), goal, 1e-6));
+                              start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(detour_traj.value(detour_traj.end_time()), goal,
+                              kTolerance));
 
   // The detour should be longer than the shortest path.
   double detour_path_length = 0.0;
@@ -298,10 +342,11 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
   EXPECT_TRUE(fastest_path_result.is_success());
   EXPECT_EQ(fastest_path_traj.rows(), 2);
   EXPECT_EQ(fastest_path_traj.cols(), 1);
+  EXPECT_TRUE(
+      CompareMatrices(fastest_path_traj.value(fastest_path_traj.start_time()),
+                      start, kTolerance));
   EXPECT_TRUE(CompareMatrices(
-      fastest_path_traj.value(fastest_path_traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(
-      fastest_path_traj.value(fastest_path_traj.end_time()), goal, 1e-6));
+      fastest_path_traj.value(fastest_path_traj.end_time()), goal, kTolerance));
 
   // We expect the fastest path to take a detour and avoid the going through the
   // gravel. Thus we expect the number of segments in the trajectory to be 3
@@ -326,7 +371,7 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
     EXPECT_TRUE((fastest_path_velocity->value(t).cwiseAbs() -
                  Vector2d(kScooterSpeed, kScooterSpeed))
                     .cwiseAbs()
-                    .minCoeff() < 1e-6);
+                    .minCoeff() < kTolerance);
     fastest_path_length += dx;
   }
   EXPECT_GT(fastest_path_length, kLeastExpectedFastestPathLength);
@@ -337,17 +382,46 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, MinimumTimeVsPathLength) {
   const double fastest_path_duration =
       fastest_path_traj.end_time() - fastest_path_traj.start_time();
   EXPECT_LT(fastest_path_duration, shortest_path_duration);
+
+  // Oh oh, it has been raining a lot! The street has been flooded and Bob
+  // can't take the scooter. We can remove the scooter regions from the graph
+  // and solve the path again.
+  gcs.RemoveSubgraph(scooter_regions);
+
+  auto [rain_path_traj, rain_path_result] = gcs.SolvePath(source, target);
+  EXPECT_TRUE(rain_path_result.is_success());
+  EXPECT_EQ(rain_path_traj.rows(), 2);
+  EXPECT_EQ(rain_path_traj.cols(), 1);
+  EXPECT_TRUE(CompareMatrices(rain_path_traj.value(rain_path_traj.start_time()),
+                              start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(rain_path_traj.value(rain_path_traj.end_time()),
+                              goal, kTolerance));
+
+  // Since the scooter regions have been removed, Bob can only walk through the
+  // through the gravel.
+  std::vector<const geometry::optimization::GraphOfConvexSets::Edge*>
+      expected_walking_path_edges = {
+          walking_regions.Vertices()[0]->incoming_edges()[0],
+          walking_regions.Vertices()[0]->outgoing_edges()[0]};
+
+  std::vector<const geometry::optimization::GraphOfConvexSets::Edge*>
+      rain_path_edges = gcs.graph_of_convex_sets().GetSolutionPath(
+          *source.Vertices()[0], *target.Vertices()[0], rain_path_result, 1.0);
+  for (size_t i = 0; i < rain_path_edges.size(); i++) {
+    EXPECT_EQ(rain_path_edges[i], expected_walking_path_edges[i]);
+  }
 }
 
-GTEST_TEST(GcsTrajectoryOptimizationTest, VelocityBoundsOnEdges) {
-  /* This simple 2D example will test the velocity bound constraints on edges,
+GTEST_TEST(GcsTrajectoryOptimizationTest, DerivativeBoundsOnEdges) {
+  /* This simple 2D example will test the derivative bound constraints on edges,
   and illustrate and example with delays. Bob is a drag racer who wants to beat
   the world record for the 305m strip. No rolling start is allowed, so the car
-  has to have zero velocity in the beginning. However, he can drive as fast as
-  his car allows through the finish line (50 m/s). There is only one problem,
-  this drag strip is known to get crossed by ducks, so Bob has to be careful not
-  to hit any ducks. It takes the ducks about 10 seconds to cross the track, and
-  Bob has to wait for them.
+  has to have zero velocity and acceleration in the beginning. However, he can
+  drive as fast as his car allows through the finish line (50 m/s). His car is
+  electric and deliver infinite torque, thus there are no acceleration limits.
+  There is only one problem, this drag strip is known to get crossed by ducks,
+  so Bob has to be careful not to hit any ducks. It takes the ducks about 10
+  seconds to cross the track, and Bob has to wait for them.
   */
   // clang-format off
   /*    305m                                        75m             🚥
@@ -370,16 +444,16 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, VelocityBoundsOnEdges) {
   // We need to duplicate the race track regions to sandwich the duck regions.
   auto& race_track_1 = gcs.AddRegions(
       MakeConvexSets(HPolyhedron::MakeBox(Vector2d(0, -5), Vector2d(305, 5))),
-      3);
+      6, 0.0, 500.0);
   auto& race_track_2 = gcs.AddRegions(
       MakeConvexSets(HPolyhedron::MakeBox(Vector2d(0, -5), Vector2d(305, 5))),
-      3);
+      6, 0.0, 500.0);
   // Bob's car can only drive straight. So he can drive at 50 m/s forward in x,
   // but not in y.
   race_track_1.AddVelocityBounds(Vector2d(0, 0), Vector2d(kMaxSpeed, 0));
   race_track_2.AddVelocityBounds(Vector2d(0, 0), Vector2d(kMaxSpeed, 0));
 
-  // The ducks are cross the track at the 75m mark and they need at least 10
+  // The ducks are crossing the track at the 75m mark and they need at least 10
   // seconds.
   auto& ducks = gcs.AddRegions(
       MakeConvexSets(HPolyhedron::MakeBox(Vector2d(75, -5), Vector2d(75, 5))),
@@ -393,31 +467,34 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, VelocityBoundsOnEdges) {
   auto& ducks_to_race_track_2 = gcs.AddEdges(ducks, race_track_2);
   gcs.AddEdges(race_track_2, target);
 
-  // Bob's car has to start with zero velocity.
-  source_to_race_track_1.AddVelocityBounds(Vector2d(0, 0), Vector2d(0, 0));
+  // Bob's car has to start with zero velocity and acceleration.
+  source_to_race_track_1.AddZeroDerivativeConstraints(1);
+  source_to_race_track_1.AddZeroDerivativeConstraints(2);
 
   // Bob doesn't want to run the ducks over, so he has to stop before the ducks.
-  // Hence the car will be at zero velocity.
+  // Hence the car will be at zero velocity. Another way to add the constraint
+  // is by setting the velocity bounds to zero.
   race_track_1_to_ducks.AddVelocityBounds(Vector2d(0, 0), Vector2d(0, 0));
   ducks_to_race_track_2.AddVelocityBounds(Vector2d(0, 0), Vector2d(0, 0));
+  // However, to limit acceleration constraints we need the
+  // ZeroDerivativeConstraints, which handled differently and are convex.
+  race_track_1_to_ducks.AddZeroDerivativeConstraints(2);
+  ducks_to_race_track_2.AddZeroDerivativeConstraints(2);
 
   // Bob wants to beat the time record!
   gcs.AddTimeCost();
 
   // Nonregression bound on the complexity of the underlying GCS MICP.
-  EXPECT_LT(gcs.EstimateComplexity(), 125);
-
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
+  EXPECT_LT(gcs.EstimateComplexity(), 210);
 
   auto [traj, result] = gcs.SolvePath(source, target);
 
   EXPECT_TRUE(result.is_success());
   EXPECT_EQ(traj.rows(), 2);
   EXPECT_EQ(traj.cols(), 1);
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
 
   // We expect the fastest path to drive through the race track regions and wait
   // at the duck region. Thus we expect the number of segments in the trajectory
@@ -426,12 +503,14 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, VelocityBoundsOnEdges) {
 
   // The initial velocity should be zero and the final velocity should be at the
   // maximum.
-  auto traj_vel = traj.MakeDerivative();
-  EXPECT_TRUE(CompareMatrices(traj_vel->value(traj.start_time()),
-                              Vector2d(0, 0), 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj_vel->value(traj.end_time()),
-                              Vector2d(kMaxSpeed, 0), 1e-6));
+  EXPECT_TRUE(CompareMatrices(traj.EvalDerivative(traj.start_time(), 1),
+                              Vector2d(0, 0), kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.EvalDerivative(traj.end_time(), 1),
+                              Vector2d(kMaxSpeed, 0), kTolerance));
 
+  // We also said the car starts with zero acceleration.
+  EXPECT_TRUE(CompareMatrices(traj.EvalDerivative(traj.start_time(), 2),
+                              Vector2d(0, 0), kTolerance));
   // The total duration should be at least the duck delay and the minimum time
   // it would take to drive the track down at maximum speed.
   // kDuckDelay + 305m /kMaxSpeed.
@@ -448,12 +527,109 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, VelocityBoundsOnEdges) {
   }
 
   // The car should be stopped at the ducks for kDuckDelay seconds.
-  EXPECT_TRUE(CompareMatrices(traj_vel->value(stopped_at_ducks_time),
-                              Vector2d(0, 0), 1e-6));
+  EXPECT_TRUE(CompareMatrices(traj.EvalDerivative(stopped_at_ducks_time, 1),
+                              Vector2d(0, 0), kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.EvalDerivative(stopped_at_ducks_time, 2),
+                              Vector2d(0, 0), kTolerance));
 
-  EXPECT_TRUE(
-      CompareMatrices(traj_vel->value(stopped_at_ducks_time + kDuckDelay),
-                      Vector2d(0, 0), 1e-6));
+  EXPECT_TRUE(CompareMatrices(
+      traj.EvalDerivative(stopped_at_ducks_time + kDuckDelay, 1),
+      Vector2d(0, 0), kTolerance));
+  EXPECT_TRUE(CompareMatrices(
+      traj.EvalDerivative(stopped_at_ducks_time + kDuckDelay, 2),
+      Vector2d(0, 0), kTolerance));
+
+  // Bob has been racing all day long, and his car ran out of battery. He still
+  // wants to race, but the only available car is a tow truck 🛻!
+  const double kMaxAcceleration = 3.0;  // m/s^2
+
+  // Bob's truck can only drive straight.
+  race_track_1.AddNonlinearDerivativeBounds(Vector2d(-kMaxAcceleration, 0),
+                                            Vector2d(kMaxAcceleration, 0), 2);
+  race_track_2.AddNonlinearDerivativeBounds(Vector2d(-kMaxAcceleration, 0),
+                                            Vector2d(kMaxAcceleration, 0), 2);
+
+  if (SnoptSolverUnavailable()) return;
+  GraphOfConvexSetsOptions options;
+  solvers::SnoptSolver snopt;
+  options.solver = &snopt;
+  options.max_rounded_paths = 3;
+  auto [traj_truck, result_truck] = gcs.SolvePath(source, target, options);
+
+  EXPECT_TRUE(result_truck.is_success());
+  EXPECT_EQ(traj_truck.rows(), 2);
+  EXPECT_EQ(traj_truck.cols(), 1);
+  EXPECT_TRUE(CompareMatrices(traj_truck.value(traj_truck.start_time()), start,
+                              kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj_truck.value(traj_truck.end_time()), goal,
+                              kTolerance));
+
+  // Let's make sure the truck remained within the acceleration bounds.
+  for (double t = traj_truck.start_time(); t < traj_truck.end_time();
+       t += kTimeStep) {
+    EXPECT_TRUE(traj_truck.EvalDerivative(t, 2).cwiseAbs()(0) <=
+                kMaxAcceleration + kTolerance);
+  }
+
+  // The truck should have taken longer to reach the finish line.
+  EXPECT_GT(traj_truck.end_time() - traj_truck.start_time(),
+            traj.end_time() - traj.start_time());
+
+  // Ensure the race car was indeed accelerating faster than the truck.
+  bool racecar_accelerating_faster = false;
+  for (double t = traj.start_time(); t < traj.end_time(); t += kTimeStep) {
+    if (traj.EvalDerivative(t, 2).cwiseAbs()(0) >
+        kMaxAcceleration + kTolerance) {
+      racecar_accelerating_faster = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(racecar_accelerating_faster);
+}
+
+GTEST_TEST(GcsTrajectoryOptimizationTest, RemoveSubgraph) {
+  /*Ensure that removing a subgraph actually removes vertices/edges in the gcs*/
+  const int kDimension = 2;
+  GcsTrajectoryOptimization gcs(kDimension);
+  EXPECT_EQ(gcs.num_positions(), kDimension);
+
+  auto& graph1 =
+      gcs.AddRegions(MakeConvexSets(HPolyhedron::MakeUnitBox(kDimension),
+                                    HPolyhedron::MakeUnitBox(kDimension)),
+                     1);
+  auto& graph2 =
+      gcs.AddRegions(MakeConvexSets(HPolyhedron::MakeUnitBox(kDimension),
+                                    HPolyhedron::MakeUnitBox(kDimension)),
+                     1);
+  gcs.AddEdges(graph1, graph2);
+
+  // We expect four vertices, since there are two regions per subgraph.
+  const int kExpectedVertices = 4;
+  EXPECT_EQ(gcs.graph_of_convex_sets().Vertices().size(), kExpectedVertices);
+  // The regions in the subgraph are connected via two edges and since they
+  // overlap, another four edges are added between the subgraphs.
+  const int kExpectedEdges = 2 * 2 + 4;
+  EXPECT_EQ(gcs.graph_of_convex_sets().Edges().size(), kExpectedEdges);
+
+  // After removing both subgraphs, we expect no vertices or edges in the gcs.
+  gcs.RemoveSubgraph(graph1);
+  gcs.RemoveSubgraph(graph2);
+  EXPECT_EQ(gcs.graph_of_convex_sets().Vertices().size(), 0);
+  EXPECT_EQ(gcs.graph_of_convex_sets().Edges().size(), 0);
+  EXPECT_EQ(gcs.GetSubgraphs().size(), 0);
+  EXPECT_EQ(gcs.GetEdgesBetweenSubgraphs().size(), 0);
+
+  // Create to remove a subgraph that hasn't been associated with the gcs
+  // instance. For that, we will create another gcs object with a separate
+  // subgraph and try to remove it from the previous instance.
+  GcsTrajectoryOptimization gcs2(kDimension);
+
+  auto& graph3 =
+      gcs2.AddRegions(MakeConvexSets(HPolyhedron::MakeUnitBox(kDimension),
+                                     HPolyhedron::MakeUnitBox(kDimension)),
+                      1);
+  DRAKE_EXPECT_THROWS_MESSAGE(gcs.RemoveSubgraph(graph3),
+                              ".* is not registered with `this`.*");
 }
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidPositions) {
@@ -495,7 +671,7 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, ZeroOrderPathLengthCost) {
   DRAKE_EXPECT_NO_THROW(gcs.AddPathLengthCost());
 }
 
-GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidVelocityBounds) {
+GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidDerivativeBounds) {
   /* The velocity of a curve is not defined for a subgraph of order 0.*/
   const int kDimension = 2;
   GcsTrajectoryOptimization gcs(kDimension);
@@ -507,6 +683,9 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidVelocityBounds) {
   auto& regions2 =
       gcs.AddRegions(MakeConvexSets(HPolyhedron::MakeUnitBox(kDimension)), 0);
 
+  auto& regions3 =
+      gcs.AddRegions(MakeConvexSets(HPolyhedron::MakeUnitBox(kDimension)), 3);
+
   auto& regions1_to_regions2 = gcs.AddEdges(regions1, regions2);
 
   DRAKE_EXPECT_THROWS_MESSAGE(
@@ -517,7 +696,7 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidVelocityBounds) {
   DRAKE_EXPECT_NO_THROW(
       gcs.AddVelocityBounds(Vector2d::Zero(), Vector2d::Zero()));
 
-  // lower and upper bound must have the same dimension as the graph.
+  // Lower and upper bound must have the same dimension as the graph.
   DRAKE_EXPECT_THROWS_MESSAGE(
       regions1.AddVelocityBounds(Vector3d::Zero(), Vector2d::Zero()),
       ".*size.*.num_positions.*");
@@ -533,6 +712,66 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidVelocityBounds) {
                                   Vector2d::Zero(), Vector2d::Zero()),
                               "Cannot add velocity bounds to a subgraph edges "
                               "where both subgraphs have zero order.");
+
+  // The derivative order must be greater than 1.
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddZeroDerivativeConstraints(0),
+      "Derivative order must be greater than 1.");
+
+  // Can't enforce zero derivatives to an edge if both regions have order 0.
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddZeroDerivativeConstraints(1),
+      "Cannot add derivative bounds to subgraph edges where both subgraphs "
+      "have less than derivative order.\n From subgraph order: 0\n To subgraph "
+      "order: 0\n Derivative order: 1");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddZeroDerivativeConstraints(2),
+      "Cannot add derivative bounds to subgraph edges where both subgraphs "
+      "have less than derivative order.\n From subgraph order: 0\n To subgraph "
+      "order: 0\n Derivative order: 2");
+
+  // Test the nonlinear derivative bounds.
+  // Prefer velocity bounds since they are linear.
+  DRAKE_EXPECT_THROWS_MESSAGE(regions3.AddNonlinearDerivativeBounds(
+                                  Vector2d::Zero(), Vector2d::Zero(), 1),
+                              "Use AddVelocityBounds instead.*");
+
+  DRAKE_EXPECT_THROWS_MESSAGE(regions1_to_regions2.AddNonlinearDerivativeBounds(
+                                  Vector2d::Zero(), Vector2d::Zero(), 1),
+                              "Use AddVelocityBounds instead.*");
+
+  // The zeroth order derivative is not a proper derivative.
+  DRAKE_EXPECT_THROWS_MESSAGE(regions3.AddNonlinearDerivativeBounds(
+                                  Vector2d::Zero(), Vector2d::Zero(), 0),
+                              "Derivative order must be greater than 1.");
+  DRAKE_EXPECT_THROWS_MESSAGE(regions1_to_regions2.AddNonlinearDerivativeBounds(
+                                  Vector2d::Zero(), Vector2d::Zero(), 0),
+                              "Derivative order must be greater than 1.");
+
+  // Lower and upper bound must have the same dimension as the graph.
+  DRAKE_EXPECT_THROWS_MESSAGE(regions3.AddNonlinearDerivativeBounds(
+                                  Vector3d::Zero(), Vector2d::Zero(), 2),
+                              ".*size.*.num_positions.*");
+  DRAKE_EXPECT_THROWS_MESSAGE(regions1_to_regions2.AddNonlinearDerivativeBounds(
+                                  Vector3d::Zero(), Vector2d::Zero(), 2),
+                              ".*size.*.num_positions.*");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      gcs.AddNonlinearDerivativeBounds(Vector2d::Zero(), Vector3d::Zero(), 2),
+      ".*size.*.num_positions.*");
+
+  // Can't add derivative bounds to a subgraph with an order lower than the
+  // derivative order.
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions3.AddNonlinearDerivativeBounds(Vector2d::Zero(), Vector2d::Zero(),
+                                            4),
+      "Derivative order must be less than or equal to the set order.");
+
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddNonlinearDerivativeBounds(Vector2d::Zero(),
+                                                        Vector2d::Zero(), 2),
+      "Cannot add derivative bounds to subgraph edges where both subgraphs "
+      "have less than derivative order.\n From subgraph order: 0\n To subgraph "
+      "order: 0\n Derivative order: 2");
 }
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidContinuityConstraints) {
@@ -561,6 +800,18 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidContinuityConstraints) {
       gcs.AddPathContinuityConstraints(0),
       "Path continuity is enforced by default. Choose a higher order.");
 
+  // Zero order path continuity should throw an error, since it's enforced by
+  // default.
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1.AddContinuityConstraints(0),
+      "Path continuity is enforced by default. Choose a higher order.");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddContinuityConstraints(0),
+      "Path continuity is enforced by default. Choose a higher order.");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      gcs.AddContinuityConstraints(0),
+      "Path continuity is enforced by default. Choose a higher order.");
+
   // Negative continuity should be rejected as well.
   DRAKE_EXPECT_THROWS_MESSAGE(regions1.AddPathContinuityConstraints(-1),
                               "Order must be greater than or equal to 1.");
@@ -570,16 +821,30 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidContinuityConstraints) {
   DRAKE_EXPECT_THROWS_MESSAGE(gcs.AddPathContinuityConstraints(-1),
                               "Order must be greater than or equal to 1.");
 
+  // Negative continuity should be rejected as well.
+  DRAKE_EXPECT_THROWS_MESSAGE(regions1.AddContinuityConstraints(-1),
+                              "Order must be greater than or equal to 1.");
+  DRAKE_EXPECT_THROWS_MESSAGE(regions1_to_regions2.AddContinuityConstraints(-1),
+                              "Order must be greater than or equal to 1.");
+  DRAKE_EXPECT_THROWS_MESSAGE(gcs.AddContinuityConstraints(-1),
+                              "Order must be greater than or equal to 1.");
+
   // Adding global continuity constraints should consider the order of the
   // subgraphs and edges between subgraphs. Thus very large continuity orders
   // shouldn't be rejected.
   DRAKE_EXPECT_NO_THROW(gcs.AddPathContinuityConstraints(100));
+  DRAKE_EXPECT_NO_THROW(gcs.AddContinuityConstraints(100));
 
   // Since the order of region1 is 1, velocity continuity should be support.
   DRAKE_EXPECT_NO_THROW(regions1.AddPathContinuityConstraints(1));
+  DRAKE_EXPECT_NO_THROW(regions1.AddContinuityConstraints(1));
   // But acceleration continuity would require the region to be of order 2.
   DRAKE_EXPECT_THROWS_MESSAGE(
       regions1.AddPathContinuityConstraints(2),
+      "Cannot add continuity constraint of order greater than the set "
+      "order.");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1.AddContinuityConstraints(2),
       "Cannot add continuity constraint of order greater than the set "
       "order.");
 
@@ -588,6 +853,12 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidContinuityConstraints) {
   DRAKE_EXPECT_NO_THROW(regions1_to_regions2.AddPathContinuityConstraints(1));
   DRAKE_EXPECT_THROWS_MESSAGE(
       regions1_to_regions2.AddPathContinuityConstraints(2),
+      "Cannot add continuity constraint to a subgraph edge where both "
+      "subgraphs order are not greater than or equal to the requested "
+      "continuity order.");
+  DRAKE_EXPECT_NO_THROW(regions1_to_regions2.AddContinuityConstraints(1));
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      regions1_to_regions2.AddContinuityConstraints(2),
       "Cannot add continuity constraint to a subgraph edge where both "
       "subgraphs order are not greater than or equal to the requested "
       "continuity order.");
@@ -606,10 +877,6 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, DisjointGraph) {
       gcs.AddRegions(MakeConvexSets(Point(start1), Point(start2)), 0);
 
   auto& target = gcs.AddRegions(MakeConvexSets(Point(goal1), Point(goal2)), 0);
-
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
 
   // Define solver options.
   GraphOfConvexSetsOptions options;
@@ -749,6 +1016,105 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, InvalidSubspace) {
   DRAKE_EXPECT_THROWS_MESSAGE(
       gcs.AddEdges(regions1, regions2, &vertices_subspace),
       "Subspace must be a Point or HPolyhedron.");
+}
+
+GTEST_TEST(GcsTrajectoryOptimizationTest, UnwrapToContinousTrajectory) {
+  std::vector<copyable_unique_ptr<trajectories::Trajectory<double>>> segments;
+  Eigen::MatrixXd control_points_1(3, 3), control_points_2(3, 3),
+      control_points_3(3, 3);
+  // clang-format off
+  control_points_1 << 0, 1.0, 2.0,
+                      1.0 - 8 * M_PI, 2.0 - 8 * M_PI, 3.0 - 8 * M_PI,
+                      2.0 + 4 * M_PI, 1.0 + 4 * M_PI, 4.0 + 4 * M_PI;
+  control_points_2 << 2.0 , 2.5, 4.0,
+                      3.0 + 2 * M_PI, 1.0 + 2 * M_PI, 0.0 + 2 * M_PI,
+                      4.0 - 6 * M_PI, 3.0 - 6 * M_PI, 2.0 - 6 * M_PI;
+  control_points_3 << 4.0, -2.0, 0.0,
+                      0.0, 1.0, 2.0,
+                      2.0, 3.0, 4.0;
+  // clang-format on
+  segments.emplace_back(std::make_unique<trajectories::BezierCurve<double>>(
+      0.0, 1.0, control_points_1));
+  segments.emplace_back(std::make_unique<trajectories::BezierCurve<double>>(
+      1.0, 4.0, control_points_2));
+  segments.emplace_back(std::make_unique<trajectories::BezierCurve<double>>(
+      4.0, 6.0, control_points_3));
+  const auto traj = trajectories::CompositeTrajectory<double>(segments);
+  std::vector<int> continuous_revolute_joints = {1, 2};
+  const auto unwrapped_traj =
+      GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+          traj, continuous_revolute_joints);
+  // Small number to shift time around discontinuity points.
+  const double time_eps = 1e-7;
+  // Small number to compare position around discontinuity points.
+  // A rough upper bound for the largest derivative of the Bezier curve is about
+  // 10, therefore the error upper bound is expected to be around 10 * time_eps.
+  const double pos_eps = 1e-6;
+  double middle_time_1 = unwrapped_traj.get_segment_times()[1];
+  double middle_time_2 = unwrapped_traj.get_segment_times()[2];
+  EXPECT_NEAR(middle_time_1, 1.0, time_eps);
+  EXPECT_NEAR(middle_time_2, 4.0, time_eps);
+  // Verify the unwrapped trajectory is continous at the middle times.
+  EXPECT_TRUE(CompareMatrices(unwrapped_traj.value(middle_time_1 - time_eps),
+                              unwrapped_traj.value(middle_time_1 + time_eps),
+                              pos_eps));
+  EXPECT_TRUE(CompareMatrices(unwrapped_traj.value(middle_time_2 - time_eps),
+                              unwrapped_traj.value(middle_time_2 + time_eps),
+                              pos_eps));
+  std::vector<int> starting_rounds = {-1, 0};
+  const auto unwrapped_traj_with_start =
+      GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+          traj, continuous_revolute_joints, starting_rounds);
+  // Check if the start is unwrapped to the correct value.
+  EXPECT_TRUE(CompareMatrices(unwrapped_traj_with_start.value(0.0),
+                              Eigen::Vector3d{0.0, 1.0 - 2 * M_PI, 2.0},
+                              pos_eps));
+  EXPECT_TRUE(CompareMatrices(
+      unwrapped_traj_with_start.value(middle_time_1 - time_eps),
+      unwrapped_traj_with_start.value(middle_time_1 + time_eps), pos_eps));
+  EXPECT_TRUE(CompareMatrices(
+      unwrapped_traj_with_start.value(middle_time_2 - time_eps),
+      unwrapped_traj_with_start.value(middle_time_2 + time_eps), pos_eps));
+  // Check for invalid start_rounds
+  const std::vector<int> invalid_start_rounds = {-1, 0, 1};
+  EXPECT_THROW(GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+                   traj, continuous_revolute_joints, invalid_start_rounds),
+               std::runtime_error);
+  // Check for discontinuity for continuous revolute joints
+  control_points_2 << 2.5, 2.5, 4.0, 3.0 + 2 * M_PI, 1.0 + 2 * M_PI,
+      0.0 + 2 * M_PI, 4.0 - 6 * M_PI, 3.0 - 6 * M_PI, 2.0 - 6 * M_PI;
+  segments[1] = std::make_unique<trajectories::BezierCurve<double>>(
+      1.0, 4.0, control_points_2);
+  const auto traj_not_continous_on_revolute_manifold =
+      trajectories::CompositeTrajectory<double>(segments);
+  // For joint 0, the trajectory is not continous: 2.0 (end of segment 0)--> 2.5
+  // (start of segment 1). If we treat joint 0 as continous revolute joint, the
+  // unwrapping will fail.
+  continuous_revolute_joints = {0, 1};
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+          traj_not_continous_on_revolute_manifold, continuous_revolute_joints),
+      ".*is not a multiple of 2π at segment.*");
+}
+
+GTEST_TEST(GcsTrajectoryOptimizationTest, NotBezierCurveError) {
+  std::vector<copyable_unique_ptr<trajectories::Trajectory<double>>> segments;
+  auto traj_1 = trajectories::PiecewisePolynomial<double>::FirstOrderHold(
+      std::vector<double>{0, 1},
+      std::vector<Eigen::MatrixXd>{Eigen::MatrixXd::Zero(1, 2),
+                                   Eigen::MatrixXd::Ones(1, 2)});
+  auto traj_2 = trajectories::PiecewisePolynomial<double>::FirstOrderHold(
+      std::vector<double>{1, 2},
+      std::vector<Eigen::MatrixXd>{Eigen::MatrixXd::Zero(1, 2),
+                                   Eigen::MatrixXd::Ones(1, 2)});
+  segments.emplace_back(traj_1.Clone());
+  segments.emplace_back(traj_2.Clone());
+  const auto traj = trajectories::CompositeTrajectory<double>(segments);
+  std::vector<int> continuous_revolute_joints = {0};
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+          traj, continuous_revolute_joints),
+      ".*BezierCurve<double>.*");
 }
 
 /* This 2D environment has been presented in the GCS paper.
@@ -900,10 +1266,6 @@ TEST_F(SimpleEnv2D, BasicShortestPath) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LT(gcs.EstimateComplexity(), 1e3);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
-
   // Define solver options.
   GraphOfConvexSetsOptions options;
   options.max_rounded_paths = 3;
@@ -911,11 +1273,12 @@ TEST_F(SimpleEnv2D, BasicShortestPath) {
   auto [traj, result] = gcs.SolvePath(source, target, options);
 
   EXPECT_TRUE(result.is_success());
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
 }
 
-TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
+TEST_F(SimpleEnv2D, GlobalPathContinuityConstraints) {
   const int kDimension = 2;
   const double kSpeed = 1.0;
   GcsTrajectoryOptimization gcs(kDimension);
@@ -940,10 +1303,6 @@ TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LT(gcs.EstimateComplexity(), 2.5e3);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
-
   // Define solver options.
   GraphOfConvexSetsOptions options;
   options.max_rounded_paths = 5;
@@ -951,14 +1310,15 @@ TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
   auto [traj, result] = gcs.SolvePath(source, target, options);
 
   EXPECT_TRUE(result.is_success());
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
 
   auto normalized_traj = GcsTrajectoryOptimization::NormalizeSegmentTimes(traj);
   EXPECT_TRUE(CompareMatrices(
-      normalized_traj.value(normalized_traj.start_time()), start, 1e-6));
+      normalized_traj.value(normalized_traj.start_time()), start, kTolerance));
   EXPECT_TRUE(CompareMatrices(normalized_traj.value(normalized_traj.end_time()),
-                              goal, 1e-6));
+                              goal, kTolerance));
   EXPECT_EQ(normalized_traj.get_number_of_segments(),
             traj.get_number_of_segments());
   EXPECT_EQ(normalized_traj.start_time(), traj.start_time());
@@ -976,7 +1336,7 @@ TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
         normalized_segment_vel->value(normalized_segment_vel->end_time()),
         normalized_next_segment_vel->value(
             normalized_next_segment_vel->start_time()),
-        1e-6));
+        kTolerance));
 
     auto normalized_segment_acc = normalized_traj.segment(i).MakeDerivative(2);
     auto normalized_next_segment_acc =
@@ -985,7 +1345,158 @@ TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
         normalized_segment_acc->value(normalized_segment_acc->end_time()),
         normalized_next_segment_acc->value(
             normalized_next_segment_acc->start_time()),
-        1e-6));
+        kTolerance));
+  }
+}
+
+TEST_F(SimpleEnv2D, GlobalContinuityConstraints) {
+  const int kDimension = 2;
+  const double kSpeed = 1.0;
+
+  GcsTrajectoryOptimization gcs(kDimension);
+  EXPECT_EQ(gcs.num_positions(), kDimension);
+
+  Vector2d start(0.2, 0.2), goal(4.8, 4.8);
+  auto& regions = gcs.AddRegions(regions_, 6);
+  auto& source = gcs.AddRegions(MakeConvexSets(Point(start)), 0, 0.0, 0.0);
+  auto& target = gcs.AddRegions(MakeConvexSets(Point(goal)), 0, 0.0, 0.0);
+
+  gcs.AddEdges(source, regions);
+  gcs.AddEdges(regions, target);
+
+  gcs.AddPathLengthCost();
+  gcs.AddTimeCost();
+  gcs.AddVelocityBounds(Vector2d(-kSpeed, -kSpeed), Vector2d(kSpeed, kSpeed));
+
+  // Add velocity and acceleration continuity on q(t).
+  gcs.AddContinuityConstraints(1);
+  gcs.AddContinuityConstraints(2);
+
+  // Nonregression bound on the complexity of the underlying GCS MICP.
+  EXPECT_LT(gcs.EstimateComplexity(), 4.5e3);
+
+  if (SnoptSolverUnavailable()) return;
+  // Define solver options.
+  GraphOfConvexSetsOptions options;
+  solvers::SnoptSolver snopt;
+  options.restriction_solver = &snopt;
+  options.max_rounded_paths = 2;
+
+  auto [traj, result] = gcs.SolvePath(source, target, options);
+
+  EXPECT_TRUE(result.is_success());
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
+
+  // Check for velocity and acceleration continuity on q(t).
+  for (int i = 0; i < traj.get_number_of_segments() - 1; ++i) {
+    auto segment_vel = traj.segment(i).MakeDerivative();
+    auto next_segment_vel = traj.segment(i + 1).MakeDerivative();
+    EXPECT_TRUE(CompareMatrices(
+        segment_vel->value(segment_vel->end_time()),
+        next_segment_vel->value(next_segment_vel->start_time()), kTolerance));
+
+    auto segment_acc = traj.segment(i).MakeDerivative(2);
+    auto next_segment_acc = traj.segment(i + 1).MakeDerivative(2);
+    EXPECT_TRUE(CompareMatrices(
+        segment_acc->value(segment_acc->end_time()),
+        next_segment_acc->value(next_segment_acc->start_time()), kTolerance));
+  }
+}
+
+TEST_F(SimpleEnv2D, DerivativeConstraints) {
+  const int kDimension = 2;
+  const double kNumSamples = 1e3;
+  const double kMaxSpeed = 2.0;
+  const double kMaxAcceleration = 1.0;
+  const double kMaxJerk = 7.5;
+
+  GcsTrajectoryOptimization gcs(kDimension);
+  EXPECT_EQ(gcs.num_positions(), kDimension);
+
+  Vector2d start(0.2, 0.2), goal(4.8, 4.8);
+  auto& regions = gcs.AddRegions(regions_, 6, 1e-5);
+  auto& source = gcs.AddRegions(MakeConvexSets(Point(start)), 0, 0.0, 0.0);
+  auto& target = gcs.AddRegions(MakeConvexSets(Point(goal)), 0, 0.0, 0.0);
+
+  gcs.AddEdges(source, regions);
+  gcs.AddEdges(regions, target);
+
+  gcs.AddTimeCost();
+
+  // Add velocity bounds.
+  gcs.AddVelocityBounds(Vector2d(-kMaxSpeed, -kMaxSpeed),
+                        Vector2d(kMaxSpeed, kMaxSpeed));
+
+  // Solve the problem and check the derivative bounds.
+  // The velocities should be bounded, while the acceleration and jerk is
+  // expected to be violated.
+  GraphOfConvexSetsOptions options;
+  options.max_rounded_paths = 5;
+  if (GurobiOrMosekSolverUnavailableDuringMemoryCheck()) return;
+
+  auto [traj_velocity_bounded, result_velocity_bounded] =
+      gcs.SolvePath(source, target, options);
+
+  EXPECT_TRUE(result_velocity_bounded.is_success());
+  EXPECT_TRUE(CompareMatrices(
+      traj_velocity_bounded.value(traj_velocity_bounded.start_time()), start,
+      kTolerance));
+  EXPECT_TRUE(CompareMatrices(
+      traj_velocity_bounded.value(traj_velocity_bounded.end_time()), goal,
+      kTolerance));
+
+  bool exceeded_acceleration_bounds = false;
+  bool exceeded_jerk_bounds = false;
+  double dt =
+      (traj_velocity_bounded.end_time() - traj_velocity_bounded.start_time()) /
+      kNumSamples;
+  for (double t = traj_velocity_bounded.start_time();
+       t < traj_velocity_bounded.end_time(); t += dt) {
+    EXPECT_LT(traj_velocity_bounded.EvalDerivative(t, 1).cwiseAbs().maxCoeff(),
+              kMaxSpeed + kTolerance);
+    if (traj_velocity_bounded.EvalDerivative(t, 2).cwiseAbs().maxCoeff() >
+        kMaxAcceleration + kTolerance) {
+      exceeded_acceleration_bounds = true;
+    }
+    if (traj_velocity_bounded.EvalDerivative(t, 3).cwiseAbs().maxCoeff() >
+        kMaxJerk + kTolerance) {
+      exceeded_jerk_bounds = true;
+    }
+  }
+  EXPECT_TRUE(exceeded_acceleration_bounds);
+  EXPECT_TRUE(exceeded_jerk_bounds);
+
+  // Add nonlinear acceleration and jerk bounds.
+  gcs.AddNonlinearDerivativeBounds(
+      Vector2d(-kMaxAcceleration, -kMaxAcceleration),
+      Vector2d(kMaxAcceleration, kMaxAcceleration), 2);
+  gcs.AddNonlinearDerivativeBounds(Vector2d(-kMaxJerk, -kMaxJerk),
+                                   Vector2d(kMaxJerk, kMaxJerk), 3);
+
+  // Nonregression bound on the complexity of the underlying GCS MICP.
+  EXPECT_LT(gcs.EstimateComplexity(), 2.5e3);
+
+  if (SnoptSolverUnavailable()) return;
+  solvers::SnoptSolver snopt;
+  options.restriction_solver = &snopt;
+  auto [traj, result] = gcs.SolvePath(source, target, options);
+
+  EXPECT_TRUE(result.is_success());
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
+
+  // Check that the velocity, acceleration, and jerk are bounded.
+  dt = (traj.end_time() - traj.start_time()) / kNumSamples;
+  for (double t = traj.start_time(); t < traj.end_time(); t += dt) {
+    EXPECT_LT(traj.EvalDerivative(t, 1).cwiseAbs().maxCoeff(),
+              kMaxSpeed + kTolerance);
+    EXPECT_LT(traj.EvalDerivative(t, 2).cwiseAbs().maxCoeff(),
+              kMaxAcceleration + kTolerance);
+    EXPECT_LT(traj.EvalDerivative(t, 3).cwiseAbs().maxCoeff(),
+              kMaxJerk + kTolerance);
   }
 }
 
@@ -1019,10 +1530,6 @@ TEST_F(SimpleEnv2D, DurationDelay) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LT(gcs.EstimateComplexity(), 1e3);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
-
   // Define solver options.
   GraphOfConvexSetsOptions options;
   options.max_rounded_paths = 3;
@@ -1031,13 +1538,14 @@ TEST_F(SimpleEnv2D, DurationDelay) {
 
   EXPECT_TRUE(result.is_success());
   // The trajectory should stay at the start for kStartDelay seconds.
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(kStartDelay), start, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(kStartDelay), start, kTolerance));
 
   // The trajectory should stay at the goal for kGaolDelay seconds.
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
-  EXPECT_TRUE(
-      CompareMatrices(traj.value(traj.end_time() - kGoalDelay), goal, 1e-6));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time() - kGoalDelay), goal,
+                              kTolerance));
 
   // The total trajectory duration should be at least kStartDelay + kGoalDelay.
   EXPECT_GE(traj.end_time() - traj.start_time(), kStartDelay + kGoalDelay);
@@ -1105,10 +1613,6 @@ TEST_F(SimpleEnv2D, MultiStartGoal) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LT(gcs.EstimateComplexity(), 1e3);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
-
   // Define solver options.
   GraphOfConvexSetsOptions options;
   options.max_rounded_paths = 3;
@@ -1116,8 +1620,9 @@ TEST_F(SimpleEnv2D, MultiStartGoal) {
   auto [traj, result] = gcs.SolvePath(source, target, options);
 
   EXPECT_TRUE(result.is_success());
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start2, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal2, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start2, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal2, kTolerance));
 }
 
 TEST_F(SimpleEnv2D, IntermediatePoint) {
@@ -1164,7 +1669,7 @@ TEST_F(SimpleEnv2D, IntermediatePoint) {
   EXPECT_EQ(gcs.num_positions(), kDimension);
 
   Vector2d start(0.2, 0.2), goal(4.8, 4.8), intermediate(2.3, 3.5);
-  const double kSpeed = 1.0;
+  const double kSpeed = 2.0;
 
   // Both a Point and an HPolytope are valid subspaces.
   Point subspace_point(intermediate);
@@ -1194,12 +1699,15 @@ TEST_F(SimpleEnv2D, IntermediatePoint) {
   auto& main1_to_main2_region = gcs.AddEdges(main1, main2, &subspace_region);
   auto& main2_to_target = gcs.AddEdges(main2, target);
 
-  // Add zero velocity constraints to the source, target and the intermediate
-  // point and region.
+  // Add zero velocity constraints to the source, and target.
   source_to_main.AddVelocityBounds(Vector2d::Zero(), Vector2d::Zero());
-  main1_to_main2_pt.AddVelocityBounds(Vector2d::Zero(), Vector2d::Zero());
-  main1_to_main2_region.AddVelocityBounds(Vector2d::Zero(), Vector2d::Zero());
   main2_to_target.AddVelocityBounds(Vector2d::Zero(), Vector2d::Zero());
+
+  // Add half of the velocity limit to the intermediate point and region.
+  main1_to_main2_pt.AddVelocityBounds(Vector2d(-kSpeed / 2, -kSpeed / 2),
+                                      Vector2d(kSpeed / 2, kSpeed / 2));
+  main1_to_main2_region.AddVelocityBounds(Vector2d(-kSpeed / 2, -kSpeed / 2),
+                                          Vector2d(kSpeed / 2, kSpeed / 2));
 
   // We can add different costs and constraints to the individual subgraphs.
   main1.AddPathLengthCost(5);
@@ -1216,9 +1724,9 @@ TEST_F(SimpleEnv2D, IntermediatePoint) {
   // Nonregression bound on the complexity of the underlying GCS MICP.
   EXPECT_LT(gcs.EstimateComplexity(), 1100);
 
-  if (!GurobiOrMosekSolverAvailable()) {
-    return;
-  }
+  // During memory check, this test will take too long with the default solvers
+  // and requires both Gurobi and Mosek to be available.
+  if (GurobiOrMosekSolverUnavailableDuringMemoryCheck()) return;
 
   // Define solver options.
   GraphOfConvexSetsOptions options;
@@ -1227,8 +1735,39 @@ TEST_F(SimpleEnv2D, IntermediatePoint) {
   auto [traj, result] = gcs.SolvePath(source, target, options);
 
   EXPECT_TRUE(result.is_success());
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
+
+  const double kMaxAcceleration = 1.0;
+  const double kMaxJerk = 7.5;
+
+  // Add accelertation and jerk bounds to the whole graph.
+  gcs.AddNonlinearDerivativeBounds(
+      Vector2d(-kMaxAcceleration, -kMaxAcceleration),
+      Vector2d(kMaxAcceleration, kMaxAcceleration), 2);
+  gcs.AddNonlinearDerivativeBounds(Vector2d(-kMaxJerk, -kMaxJerk),
+                                   Vector2d(kMaxJerk, kMaxJerk), 3);
+
+  // Add half of the acceleration and jerk bounds to the intermediate point and
+  // region.
+  main1_to_main2_pt.AddNonlinearDerivativeBounds(
+      Vector2d(-kMaxAcceleration / 2, -kMaxAcceleration / 2),
+      Vector2d(kMaxAcceleration / 2, kMaxAcceleration / 2), 2);
+  main1_to_main2_region.AddNonlinearDerivativeBounds(
+      Vector2d(-kMaxAcceleration / 2, -kMaxAcceleration / 2),
+      Vector2d(kMaxAcceleration / 2, kMaxAcceleration / 2), 2);
+
+  if (SnoptSolverUnavailable()) return;
+  solvers::SnoptSolver snopt;
+  options.restriction_solver = &snopt;
+  auto [traj_nonlinear, result_nonlinear] =
+      gcs.SolvePath(source, target, options);
+  EXPECT_TRUE(result_nonlinear.is_success());
+  EXPECT_TRUE(CompareMatrices(traj_nonlinear.value(traj_nonlinear.start_time()),
+                              start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj_nonlinear.value(traj_nonlinear.end_time()),
+                              goal, kTolerance));
 }
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, EdgesFromWrappedJoints) {
@@ -1341,8 +1880,10 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, WraparoundInOneDimension) {
     ASSERT_TRUE(result1.is_success());
     EXPECT_NEAR(result1.get_optimal_cost(), expected_cost_wraparound, tol);
     EXPECT_EQ(traj1.get_number_of_segments(), 2);
-    EXPECT_TRUE(CompareMatrices(traj1.value(traj1.start_time()), start, 1e-6));
-    EXPECT_TRUE(CompareMatrices(traj1.value(traj1.end_time()), goal, 1e-6));
+    EXPECT_TRUE(
+        CompareMatrices(traj1.value(traj1.start_time()), start, kTolerance));
+    EXPECT_TRUE(
+        CompareMatrices(traj1.value(traj1.end_time()), goal, kTolerance));
 
     // Now check that the wraparound is supported when adding edges between
     // subgraphs.
@@ -1388,15 +1929,15 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, WraparoundInOneDimension) {
   ASSERT_TRUE(result2.is_success());
   EXPECT_NEAR(result2.get_optimal_cost(), expected_cost_no_wraparound, tol);
   EXPECT_EQ(traj2.get_number_of_segments(), 3);
-  EXPECT_TRUE(CompareMatrices(traj2.value(traj2.start_time()), start, 1e-6));
-  EXPECT_TRUE(CompareMatrices(traj2.value(traj2.end_time()), goal, 1e-6));
+  EXPECT_TRUE(
+      CompareMatrices(traj2.value(traj2.start_time()), start, kTolerance));
+  EXPECT_TRUE(CompareMatrices(traj2.value(traj2.end_time()), goal, kTolerance));
 }
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, WraparoundInTwoDimensions) {
-  if (!GurobiOrMosekSolverAvailable()) {
-    // These test cases are too large for free solvers such as CSDP.
-    return;
-  }
+  // During memory check, this test will take too long with the default solvers
+  // and requires both Gurobi and Mosek to be available.
+  if (GurobiOrMosekSolverUnavailableDuringMemoryCheck()) return;
   const double tol = 1e-7;
 
   ConvexSets sets;
@@ -1488,8 +2029,9 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, WraparoundInTwoDimensions) {
     auto [traj, result] = gcs.SolvePath(source, target, options);
     EXPECT_TRUE(result.is_success());
     EXPECT_NEAR(result.get_optimal_cost(), config.expected_cost, tol);
-    EXPECT_TRUE(CompareMatrices(traj.value(traj.start_time()), start, 1e-6));
-    EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, 1e-6));
+    EXPECT_TRUE(
+        CompareMatrices(traj.value(traj.start_time()), start, kTolerance));
+    EXPECT_TRUE(CompareMatrices(traj.value(traj.end_time()), goal, kTolerance));
 
     auto& source2 = gcs.AddRegions(
         MakeConvexSets(Point(start + config.start_offset_works)), 0);
@@ -1632,14 +2174,10 @@ GTEST_TEST(GcsTrajectoryOptimizationTest, ContinuousJointsApi) {
 
 GTEST_TEST(GcsTrajectoryOptimizationTest, GetContinuousJoints) {
   MultibodyPlant<double> plant(0.0);
-  const RigidBody<double>& first_body =
-      plant.AddRigidBody("first_body", SpatialInertia<double>());
-  const RigidBody<double>& second_body =
-      plant.AddRigidBody("second_body", SpatialInertia<double>());
-  const RigidBody<double>& third_body =
-      plant.AddRigidBody("third_body", SpatialInertia<double>());
-  const RigidBody<double>& fourth_body =
-      plant.AddRigidBody("fourth_body", SpatialInertia<double>());
+  const RigidBody<double>& first_body = plant.AddRigidBody("first_body");
+  const RigidBody<double>& second_body = plant.AddRigidBody("second_body");
+  const RigidBody<double>& third_body = plant.AddRigidBody("third_body");
+  const RigidBody<double>& fourth_body = plant.AddRigidBody("fourth_body");
 
   // Add a planar joint without limits
   plant.AddJoint<PlanarJoint>("first_joint", plant.world_body(), {}, first_body,

@@ -7,6 +7,7 @@
 
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
+#include <tiny_gltf.h>
 
 // To ease build system upkeep, we annotate VTK includes with their deps.
 #include <vtkImageData.h>  // vtkCommonDataModel
@@ -41,6 +42,8 @@ using render::RenderLabel;
 // Friend class that gives the tests access to a RenderEngineGl's OpenGlContext.
 class RenderEngineGlTester {
  public:
+  using Prop = RenderEngineGl::Prop;
+
   /* Constructs a tester on the given engine. The tester keeps a reference to
    the given `engine`; the engine must stay alive at least as long as the
    tester.  */
@@ -53,26 +56,9 @@ class RenderEngineGlTester {
     return *engine_.opengl_context_;
   }
 
-  // We assume that filename produces a single render mesh, return the geometry
-  // for that mesh.
-  const internal::OpenGlGeometry GetSingleMesh(
-      const std::string& filename) const {
-    // A dummy registration data; we'll learn if the filename was accepted
-    // by examining the data.
-    RenderEngineGl::RegistrationData data{GeometryId::get_new_id(), {}, {}};
-    const std::vector<int> indices =
-        const_cast<RenderEngineGl&>(engine_).GetMeshes(filename, &data);
-    if (indices.size() != 1) {
-      throw std::runtime_error(
-          "GetSingleMesh() used with a file that doesn't return a single "
-          "mesh.");
-    }
-    if (!data.accepted) {
-      throw std::runtime_error(
-          "GetSingleMesh() returned a mesh index, but claims it's not "
-          "accepted.");
-    }
-    return engine_.geometries_[indices.front()];
+  const Prop& GetVisual(GeometryId id) {
+    DRAKE_DEMAND(engine_.visuals_.contains(id));
+    return engine_.visuals_.at(id);
   }
 
  private:
@@ -217,6 +203,29 @@ bool IsColorNear(const RgbaColor& expected, const RgbaColor& tested,
   return ::testing::AssertionFailure()
          << "At pixel " << p << "\n  Expected: " << expected
          << "\n  Found: " << tested << "\n  with tolerance: " << tolerance;
+}
+
+// Because we haven't bothered with tinygltf's stb_image dependency we're
+// obliged to provide our own load image callback. In this case, we provide a
+// no-op callback just to show that things work.
+bool LocalGltfLoadImage(tinygltf::Image*, const int, std::string*, std::string*,
+                        int, int, const unsigned char*, int, void*) {
+  return true;
+}
+
+// Simply confirm that we can use tinygltf to load a gltf file.
+GTEST_TEST(TinyGltf, SmokeTest) {
+  tinygltf::Model model;
+  tinygltf::TinyGLTF loader;
+  loader.SetImageLoader(LocalGltfLoadImage, nullptr);
+
+  const std::string path = FindResourceOrThrow(
+      "drake/geometry/render/test/meshes/fully_textured_pyramid.gltf");
+  const bool ret = loader.LoadASCIIFromFile(&model, nullptr /* err */,
+                                            nullptr /* warn */, path);
+
+  ASSERT_TRUE(ret);
+  ASSERT_EQ(model.nodes.size(), 1);
 }
 
 class RenderEngineGlTest : public ::testing::Test {
@@ -1156,6 +1165,11 @@ TEST_F(RenderEngineGlTest, MeshTest) {
 //
 // If all of that is processed correctly, we should get a cube with a different
 // color on each face. We'll test for those colors.
+//
+// This test renders against an original engine and its clone (to confirm that
+// the render artifacts survive cloning). This has a secondary benefit of
+// detecting if anything happens to corrupt the relationship between original
+// and cloned context (see, e.g., #21326).
 TEST_F(RenderEngineGlTest, MultiMaterialObj) {
   struct Face {
     // The expected *illuminated* material color. The simple illumination model
@@ -1241,51 +1255,51 @@ TEST_F(RenderEngineGlTest, MultiMaterialObj) {
   }
 }
 
-// Mostly identical as `MeshTest` except for the geometry type being Convex.
+// For the Convex shape, we're confirming that the convex hull gets rendered
+// and not the shape with a hole.
 TEST_F(RenderEngineGlTest, ConvexTest) {
-  for (const bool use_texture : {false, true}) {
-    Init(X_WR_, true);
+  Init(X_WR_, true);
 
-    // N.B. box_no_mtl.obj doesn't exist in the source tree and is generated
-    // from box.obj by stripping out material data by the build system.
-    auto filename =
-        use_texture
-            ? FindResourceOrThrow("drake/geometry/render/test/meshes/box.obj")
-            : FindResourceOrThrow(
-                  "drake/geometry/render/test/meshes/box_no_mtl.obj");
+  // Note: it is expected that in addition to the hole, this file does not have
+  // normals. Therefore, if it were processed with the Mesh logic, this test
+  // would throw complaining about missing normals.
+  auto filename = FindResourceOrThrow(
+      "drake/examples/scene_graph/cuboctahedron_with_hole.obj");
 
-    Convex convex(filename);
-    expected_label_ = RenderLabel(4);
+  // It's important to instantiate a *scaled* Convex because of how
+  // RenderEngineGl caches convex hulls. We'll detect that it got cached and
+  // instantiated as expected by examining the depth return.
+  //
+  // The cuboctahedron is bound by an aligned bounding box that extends to
+  // +/-1 along each axis. Scaling it by 0.5 means the box will only extend to
+  // 0.5 in each direction. The top has moved down 0.5 m which increases the
+  // depth value by 0.5.
+  Convex convex(filename, 0.5);
+  expected_object_depth_ += 0.5;
+  expected_label_ = RenderLabel(4);
 
-    // We do *not* pass use_texture = true to simple_material(), because we want
-    // to see that the texture comes through the natural processing.
-    PerceptionProperties material = simple_material();
-    const GeometryId id = GeometryId::get_new_id();
-    renderer_->RegisterVisual(id, convex, material, RigidTransformd::Identity(),
-                              true /* needs update */);
-    renderer_->UpdatePoses(unordered_map<GeometryId, RigidTransformd>{
-        {id, RigidTransformd::Identity()}});
+  PerceptionProperties material = simple_material();
+  const GeometryId id = GeometryId::get_new_id();
+  renderer_->RegisterVisual(id, convex, material, RigidTransformd::Identity(),
+                            true /* needs update */);
+  renderer_->UpdatePoses(unordered_map<GeometryId, RigidTransformd>{
+      {id, RigidTransformd::Identity()}});
 
-    expected_color_ = use_texture ? RgbaColor(kTextureColor) : default_color_;
-    SCOPED_TRACE("Convex test");
-    PerformCenterShapeTest(renderer_.get());
-  }
+  SCOPED_TRACE("Convex test");
+  PerformCenterShapeTest(renderer_.get());
 }
 
-// Confirms that meshes/convex referencing a file with an unsupported extension
-// are ignored. (There's also an untested one-time warning.)
-TEST_F(RenderEngineGlTest, UnsupportedMeshConvex) {
+// Confirms that Meshes referencing a file with an unsupported extension are
+// ignored. (There's also an untested one-time warning.)
+// This doesn't include Convex, because Convex support is predicated on whether
+// we can compute a convex hull for the named file -- that is tested elsewhere.
+TEST_F(RenderEngineGlTest, UnsupportedMeshFileType) {
   Init(X_WR_, false);
   const PerceptionProperties material = simple_material();
   const GeometryId id = GeometryId::get_new_id();
 
   const Mesh mesh("invalid.fbx");
   EXPECT_FALSE(renderer_->RegisterVisual(id, mesh, material,
-                                         RigidTransformd::Identity(),
-                                         false /* needs update */));
-
-  const Convex convex("invalid.fbx");
-  EXPECT_FALSE(renderer_->RegisterVisual(id, convex, material,
                                          RigidTransformd::Identity(),
                                          false /* needs update */));
 }
@@ -1747,6 +1761,37 @@ TEST_F(RenderEngineGlTest, ShowRenderLabel) {
   // TODO(SeanCurtis-TRI): Do the same for color labels when implemented.
 }
 
+// We need to confirm that two Convex shapes, referring to the same file name,
+// share the same underlying cached geometry.
+TEST_F(RenderEngineGlTest, ConvexGeometryReuse) {
+  RenderEngineGl engine;
+  RenderEngineGlTester tester(&engine);
+
+  auto filename = FindResourceOrThrow(
+      "drake/examples/scene_graph/cuboctahedron_with_hole.obj");
+
+  auto add_convex = [&filename, &engine](double scale) {
+    const GeometryId id = GeometryId::get_new_id();
+    PerceptionProperties material;
+    material.AddProperty("label", "id", RenderLabel(17));
+    const bool accepted = engine.RegisterVisual(id, Convex(filename, scale),
+                                                material, RigidTransformd());
+    DRAKE_DEMAND(accepted);
+    return id;
+  };
+
+  const GeometryId id1 = add_convex(0.5);
+  const GeometryId id2 = add_convex(1.5);
+  const RenderEngineGlTester::Prop& prop1 = tester.GetVisual(id1);
+  const RenderEngineGlTester::Prop& prop2 = tester.GetVisual(id2);
+
+  EXPECT_EQ(prop1.parts.size(), 1);
+  EXPECT_EQ(prop1.parts.size(), prop2.parts.size());
+  // Different instances nevertheless share the same geometry.
+  EXPECT_NE(&prop1.parts[0].instance, &prop2.parts[0].instance);
+  EXPECT_EQ(prop1.parts[0].instance.geometry, prop2.parts[0].instance.geometry);
+}
+
 // Confirms that when requesting the same mesh multiple times, only a single
 // OpenGlGeometry is produced.
 TEST_F(RenderEngineGlTest, MeshGeometryReuse) {
@@ -1755,16 +1800,27 @@ TEST_F(RenderEngineGlTest, MeshGeometryReuse) {
 
   auto filename =
       FindResourceOrThrow("drake/geometry/render/test/meshes/box.obj");
-  const internal::OpenGlGeometry& initial_geometry =
-      tester.GetSingleMesh(filename);
-  const internal::OpenGlGeometry& second_geometry =
-      tester.GetSingleMesh(filename);
 
-  EXPECT_EQ(initial_geometry.vertex_array, second_geometry.vertex_array);
-  EXPECT_EQ(initial_geometry.vertex_buffer, second_geometry.vertex_buffer);
-  EXPECT_EQ(initial_geometry.index_buffer, second_geometry.index_buffer);
-  EXPECT_EQ(initial_geometry.index_buffer_size,
-            second_geometry.index_buffer_size);
+  auto add_mesh = [&filename, &engine]() {
+    const GeometryId id = GeometryId::get_new_id();
+    PerceptionProperties material;
+    material.AddProperty("label", "id", RenderLabel(17));
+    const bool accepted =
+        engine.RegisterVisual(id, Mesh(filename), material, RigidTransformd());
+    DRAKE_DEMAND(accepted);
+    return id;
+  };
+
+  const GeometryId id1 = add_mesh();
+  const GeometryId id2 = add_mesh();
+  const RenderEngineGlTester::Prop& prop1 = tester.GetVisual(id1);
+  const RenderEngineGlTester::Prop& prop2 = tester.GetVisual(id2);
+
+  EXPECT_EQ(prop1.parts.size(), 1);
+  EXPECT_EQ(prop1.parts.size(), prop2.parts.size());
+  // Different instances nevertheless share the same geometry.
+  EXPECT_NE(&prop1.parts[0].instance, &prop2.parts[0].instance);
+  EXPECT_EQ(prop1.parts[0].instance.geometry, prop2.parts[0].instance.geometry);
 }
 
 // Confirm the properties of the fallback camera using the following

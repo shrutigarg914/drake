@@ -65,8 +65,8 @@ class UniversalJoint final : public Joint<T> {
   /// The additional parameters are:
   /// @param[in] damping
   ///   Viscous damping coefficient, in N⋅m⋅s, used to model losses within the
-  ///   joint. See documentation of damping() for details on modelling of the
-  ///   damping torque.
+  ///   joint. See documentation of default_damping() for details on modelling
+  ///   of the damping torque.
   /// @throws std::exception if damping is negative.
   UniversalJoint(const std::string& name, const Frame<T>& frame_on_parent,
                  const Frame<T>& frame_on_child, double damping = 0)
@@ -89,14 +89,14 @@ class UniversalJoint final : public Joint<T> {
 
   const std::string& type_name() const override;
 
-  /// Returns `this` joint's damping constant in N⋅m⋅s. The damping torque
-  /// (in N⋅m) is modeled as `τᵢ = -damping⋅ωᵢ, i = 1, 2` i.e. opposing motion,
-  /// with ωᵢ the angular rates about the i-th axis for `this` joint (see
-  /// get_angular_rates())and τᵢ the torque on child body B about the same i-th
-  /// axis.
-  double damping() const {
+  /// Returns `this` joint's default damping constant in N⋅m⋅s. The damping
+  /// torque (in N⋅m) is modeled as `τᵢ = -damping⋅ωᵢ, i = 1, 2` i.e. opposing
+  /// motion, with ωᵢ the angular rates about the i-th axis for `this` joint
+  /// (see get_angular_rates())and τᵢ the torque on child body B about the same
+  /// i-th axis.
+  double default_damping() const {
     // N.B. Both damping coefficients are set to the same value for this joint.
-    return this->damping_vector()[0];
+    return this->default_damping_vector()[0];
   }
 
   /// @name Context-dependent value access
@@ -121,7 +121,7 @@ class UniversalJoint final : public Joint<T> {
   /// @returns a constant reference to `this` joint.
   const UniversalJoint<T>& set_angles(Context<T>* context,
                                       const Vector2<T>& angles) const {
-    get_mobilizer()->set_angles(context, angles);
+    get_mobilizer()->SetAngles(context, angles);
     return *this;
   }
 
@@ -143,7 +143,7 @@ class UniversalJoint final : public Joint<T> {
   /// @returns a constant reference to `this` joint.
   const UniversalJoint<T>& set_angular_rates(
       systems::Context<T>* context, const Vector2<T>& theta_dot) const {
-    get_mobilizer()->set_angular_rates(context, theta_dot);
+    get_mobilizer()->SetAngularRates(context, theta_dot);
     return *this;
   }
 
@@ -198,14 +198,15 @@ class UniversalJoint final : public Joint<T> {
   /// Joint<T> override called through public NVI, Joint::AddInDamping().
   /// Therefore arguments were already checked to be valid.
   /// This method adds into `forces` a dissipative torque according to the
-  /// viscous law `τ = -d⋅ω`, with d the damping coefficient (see damping()).
+  /// viscous law `τ = -d⋅ω`, with d the damping coefficient (see
+  /// default_damping()).
   void DoAddInDamping(const systems::Context<T>& context,
                       MultibodyForces<T>* forces) const override {
     Eigen::Ref<VectorX<T>> tau =
         get_mobilizer()->get_mutable_generalized_forces_from_array(
             &forces->mutable_generalized_forces());
     const Vector2<T>& theta_dot = get_angular_rates(context);
-    tau = -damping() * theta_dot;
+    tau = -this->GetDampingVector(context)[0] * theta_dot;
   }
 
  private:

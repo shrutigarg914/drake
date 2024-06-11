@@ -64,12 +64,12 @@ class RpyFloatingJoint final : public Joint<T> {
   @param[in] angular_damping
     Viscous damping coefficient in N⋅m⋅s for the angular component of this
     joint's velocity, used to model losses within the joint. See documentation
-    of angular_damping() for details on modeling of the damping force.
+    of default_angular_damping() for details on modeling of the damping force.
   @param[in] translational_damping
     Viscous damping coefficient in N⋅s/m for the translational component of
     this joint's velocity, used to model losses within the joint. See
-    documentation of translational_damping() for details on modeling of the
-    damping force.
+    documentation of default_translational_damping() for details on modeling of
+  the damping force.
   @throws std::exception if angular_damping is negative.
   @throws std::exception if translational_damping is negative. */
   RpyFloatingJoint(const std::string& name, const Frame<T>& frame_on_parent,
@@ -88,6 +88,7 @@ class RpyFloatingJoint final : public Joint<T> {
                  Vector6d::Constant(std::numeric_limits<double>::infinity())) {
     DRAKE_THROW_UNLESS(angular_damping >= 0);
     DRAKE_THROW_UNLESS(translational_damping >= 0);
+
     // Parent constructor sets all default positions to zero which is correct
     // for this joint.
   }
@@ -95,24 +96,24 @@ class RpyFloatingJoint final : public Joint<T> {
   /** Returns the name of this joint type: "rpy_floating" */
   const std::string& type_name() const final;
 
-  /** Returns this joint's angular damping constant in N⋅m⋅s. The damping
-  torque (in N⋅m) is modeled as `τ = -damping⋅ω`, i.e. opposing motion, with
-  ω the angular velocity of frame M in F (see get_angular_velocity()) and τ
+  /** Returns this joint's default angular damping constant in N⋅m⋅s. The
+  damping torque (in N⋅m) is modeled as `τ = -damping⋅ω`, i.e. opposing motion,
+  with ω the angular velocity of frame M in F (see get_angular_velocity()) and τ
   the torque on child body B (to which M is rigidly attached). */
-  double angular_damping() const {
+  double default_angular_damping() const {
     // N.B. All 3 angular damping coefficients are set to the same value for
     // this joint.
-    return this->damping_vector()[0];
+    return this->default_damping_vector()[0];
   }
 
-  /** Returns this joint's translational damping constant in N⋅s/m. The
+  /** Returns this joint's default translational damping constant in N⋅s/m. The
   damping force (in N) is modeled as `f = -damping⋅v` i.e. opposing motion,
   with v the translational velocity of frame M in F (see
   get_translational_velocity()) and f the force on child body B at Mo. */
-  double translational_damping() const {
+  double default_translational_damping() const {
     // N.B. All 3 translational damping coefficients are set to the same value
     // for this joint.
-    return this->damping_vector()[3];
+    return this->default_damping_vector()[3];
   }
 
   /** @name Context-dependent value access
@@ -151,7 +152,7 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Sets the `context` so that the generalized coordinates corresponding to
   the roll-pitch-yaw rotation angles of this joint equals `angles`.
-  @param[in] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] angles
     Angles in radians to be stored in `context` ordered as θr, θp, θy.
@@ -160,13 +161,13 @@ class RpyFloatingJoint final : public Joint<T> {
   @see get_angles() for details */
   const RpyFloatingJoint<T>& set_angles(Context<T>* context,
                                         const Vector3<T>& angles) const {
-    get_mobilizer().set_angles(context, angles);
+    get_mobilizer().SetAngles(context, angles);
     return *this;
   }
 
   /** Sets the roll-pitch-yaw angles in `context` so this Joint's orientation
   is consistent with the given `R_FM` rotation matrix.
-  @param[in] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] R_FM
     The rotation matrix giving the orientation of frame M in frame F.
@@ -174,8 +175,7 @@ class RpyFloatingJoint final : public Joint<T> {
   @returns a constant reference to this joint. */
   const RpyFloatingJoint<T>& SetOrientation(
       systems::Context<T>* context, const math::RotationMatrix<T>& R_FM) const {
-    set_angles(context, math::RollPitchYaw(R_FM).vector());
-    return *this;
+    return set_angles(context, math::RollPitchYaw(R_FM).vector());
   }
 
   /** Returns the translation (position vector) `p_FM` of the child frame M's
@@ -190,16 +190,23 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Sets `context` to store the translation (position vector) `p_FM` of frame
   M's origin Mo measured and expressed in frame F.
-  @param[out] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] p_FM
     The desired position of frame M's origin in frame F, to be stored in
     `context`.
   @returns a constant reference to this joint. */
+  const RpyFloatingJoint<T>& SetTranslation(systems::Context<T>* context,
+                                            const Vector3<T>& p_FM) const {
+    get_mobilizer().SetTranslation(context, p_FM);
+    return *this;
+  }
+
+  DRAKE_DEPRECATED("2024-08-01",
+      "Use RpyFloatingJoint::SetTranslation()")
   const RpyFloatingJoint<T>& set_translation(systems::Context<T>* context,
                                              const Vector3<T>& p_FM) const {
-    get_mobilizer().set_translation(context, p_FM);
-    return *this;
+    return SetTranslation(context, p_FM);
   }
 
   /** Returns the pose `X_FM` of the outboard frame M as measured and expressed
@@ -215,23 +222,22 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Sets `context` to store `X_FM` the pose of frame M measured and expressed
   in frame F.
-  @param[out] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] X_FM
-    The desired pose of frame M in F to be stored in `context`.
+    The desired pose of frame M in frame F to be stored in `context`.
   @warning See class documentation for discussion of singular configurations.
   @returns a constant reference to `this` joint. */
   const RpyFloatingJoint<T>& SetPose(
       systems::Context<T>* context, const math::RigidTransform<T>& X_FM) const {
     const math::RotationMatrix<T>& R_FM = X_FM.rotation();
-    get_mobilizer().set_angles(context, math::RollPitchYaw<T>(R_FM).vector());
-    get_mobilizer().set_translation(context, X_FM.translation());
+    get_mobilizer().SetAngles(context, math::RollPitchYaw<T>(R_FM).vector());
+    get_mobilizer().SetTranslation(context, X_FM.translation());
     return *this;
   }
 
   /** Retrieves from `context` the angular velocity `w_FM` of the child frame
   M in the parent frame F, expressed in F.
-
   @param[in] context
     A Context for the MultibodyPlant this joint belongs to.
   @retval w_FM
@@ -244,7 +250,7 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Sets in `context` the state for this joint so that the angular velocity
   of the child frame M in the parent frame F is `w_FM`.
-  @param[out] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] w_FM
     A vector in ℝ³ with the angular velocity of the child frame M in the
@@ -253,7 +259,7 @@ class RpyFloatingJoint final : public Joint<T> {
   @returns a constant reference to this joint. */
   const RpyFloatingJoint<T>& set_angular_velocity(
       systems::Context<T>* context, const Vector3<T>& w_FM) const {
-    get_mobilizer().set_angular_velocity(context, w_FM);
+    get_mobilizer().SetAngularVelocity(context, w_FM);
     return *this;
   }
 
@@ -272,7 +278,7 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Sets in `context` the state for this joint so that the translational
   velocity of the child frame M's origin in the parent frame F is `v_FM`.
-  @param[out] context
+  @param[in,out] context
     A Context for the MultibodyPlant this joint belongs to.
   @param[in] v_FM
     A vector in ℝ³ with the translational velocity of the child frame M's
@@ -281,7 +287,7 @@ class RpyFloatingJoint final : public Joint<T> {
   @returns a constant reference to this joint. */
   const RpyFloatingJoint<T>& set_translational_velocity(
       systems::Context<T>* context, const Vector3<T>& v_FM) const {
-    get_mobilizer().set_translational_velocity(context, v_FM);
+    get_mobilizer().SetTranslationalVelocity(context, v_FM);
     return *this;
   }
   /**@}*/
@@ -363,15 +369,23 @@ class RpyFloatingJoint final : public Joint<T> {
 
   /** Joint<T> override called through public NVI, Joint::AddInDamping().
   Therefore arguments were already checked to be valid. This method adds into
-  `forces` a dissipative torque according to the viscous law `τ = -d⋅ω`, with
-  d the damping coefficient (see damping()). */
+  the translational component of `forces` for `this` joint a dissipative force
+  according to the viscous law `f = -d⋅v`, with d the damping coefficient (see
+  default_translational_damping()). This method also adds into the angular
+  component of `forces` for `this` joint a dissipative torque according to the
+  viscous law `τ = -d⋅ω`, with d the damping coefficient (see
+  default_angular_damping()). */
   void DoAddInDamping(const systems::Context<T>& context,
                       MultibodyForces<T>* forces) const final {
     Eigen::Ref<VectorX<T>> t_BMo_F =
         get_mobilizer().get_mutable_generalized_forces_from_array(
             &forces->mutable_generalized_forces());
     const Vector3<T>& w_FM = get_angular_velocity(context);
-    t_BMo_F = -angular_damping() * w_FM;
+    const Vector3<T>& v_FM = get_translational_velocity(context);
+    const T& angular_damping = this->GetDampingVector(context)[0];
+    const T& translational_damping = this->GetDampingVector(context)[3];
+    t_BMo_F.template head<3>() = -angular_damping * w_FM;
+    t_BMo_F.template tail<3>() = -translational_damping * v_FM;
   }
 
  private:

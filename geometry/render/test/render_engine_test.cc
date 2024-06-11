@@ -26,9 +26,9 @@ class RenderEngineTester {
   }
 
   bool has_id(GeometryId id) const {
-    return engine_.update_ids_.count(id) > 0 ||
-           engine_.anchored_ids_.count(id) > 0 ||
-           engine_.deformable_mesh_dofs_.count(id) > 0;
+    return engine_.update_ids_.contains(id) ||
+           engine_.anchored_ids_.contains(id) ||
+           engine_.deformable_mesh_dofs_.contains(id);
   }
 
  private:
@@ -45,8 +45,6 @@ using math::RigidTransformd;
 using std::set;
 using std::unordered_map;
 using systems::sensors::CameraInfo;
-using systems::sensors::ColorD;
-using systems::sensors::ColorI;
 using systems::sensors::ImageDepth32F;
 using systems::sensors::ImageLabel16I;
 using systems::sensors::ImageRgba8U;
@@ -298,7 +296,7 @@ GTEST_TEST(RenderEngine, RigidGeometryRegistrationAndUpdate) {
     X_WG_all[id].set_translation(p_WG);
     engine.UpdatePoses(X_WG_all);
     EXPECT_EQ(engine.updated_ids().size(), 1);
-    ASSERT_EQ(engine.updated_ids().count(id), 1);
+    ASSERT_TRUE(engine.updated_ids().contains(id));
     EXPECT_TRUE(
         CompareMatrices(engine.updated_ids().at(id).translation(), p_WG));
     EXPECT_TRUE(CompareMatrices(engine.world_pose(id).GetAsMatrix34(),
@@ -363,59 +361,6 @@ GTEST_TEST(RenderEngine, RemoveGeometry) {
     }
   }
 }
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-GTEST_TEST(RenderEngine, ColorLabelConversionDeprecated) {
-  // Explicitly testing labels at *both* ends of the reserved space -- this
-  // assumes that the reserved labels are at the top end; if that changes, we'll
-  // need a different mechanism to get a large-valued label.
-  RenderLabel label1 = RenderLabel(0);
-  RenderLabel label2 = RenderLabel(RenderLabel::kMaxUnreserved - 1);
-  RenderLabel label3 = RenderLabel::kEmpty;
-
-  // A ColorI should be invertible back to the original label.
-  ColorI color1 = DummyRenderEngine::GetColorIFromLabel(label1);
-  ColorI color2 = DummyRenderEngine::GetColorIFromLabel(label2);
-  ColorI color3 = DummyRenderEngine::GetColorIFromLabel(label3);
-  EXPECT_EQ(label1, DummyRenderEngine::LabelFromColor(color1));
-  EXPECT_EQ(label2, DummyRenderEngine::LabelFromColor(color2));
-  EXPECT_EQ(label3, DummyRenderEngine::LabelFromColor(color3));
-
-  // Different labels should produce different colors.
-  ASSERT_NE(label1, label2);
-  ASSERT_NE(label2, label3);
-  ASSERT_NE(label1, label3);
-  auto same_colors = [](const auto& expected, const auto& test) {
-    if (expected.r != test.r || expected.g != test.g || expected.b != test.b) {
-      return ::testing::AssertionFailure()
-             << "Expected color " << expected << ", found " << test;
-    }
-    return ::testing::AssertionSuccess();
-  };
-
-  EXPECT_FALSE(same_colors(color1, color2));
-  EXPECT_FALSE(same_colors(color2, color3));
-  EXPECT_FALSE(same_colors(color1, color3));
-
-  // Different labels should also produce different Normalized colors.
-  ColorD color1_d = DummyRenderEngine::GetColorDFromLabel(label1);
-  ColorD color2_d = DummyRenderEngine::GetColorDFromLabel(label2);
-  ColorD color3_d = DummyRenderEngine::GetColorDFromLabel(label3);
-  EXPECT_FALSE(same_colors(color1_d, color2_d));
-  EXPECT_FALSE(same_colors(color1_d, color3_d));
-  EXPECT_FALSE(same_colors(color2_d, color3_d));
-
-  // The normalized color should simply be the integer color divided by 255.
-  ColorD color1_d_by_hand{color1.r / 255., color1.g / 255., color1.b / 255.};
-  ColorD color2_d_by_hand{color2.r / 255., color2.g / 255., color2.b / 255.};
-  ColorD color3_d_by_hand{color3.r / 255., color3.g / 255., color3.b / 255.};
-
-  EXPECT_TRUE(same_colors(color1_d, color1_d_by_hand));
-  EXPECT_TRUE(same_colors(color2_d, color2_d_by_hand));
-  EXPECT_TRUE(same_colors(color3_d, color3_d_by_hand));
-}
-#pragma GCC diagnostic pop
 
 GTEST_TEST(RenderEngine, ColorLabelConversion) {
   // Explicitly testing labels at *both* ends of the reserved space -- this

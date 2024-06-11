@@ -1,3 +1,4 @@
+load("//tools/lint:lint.bzl", "add_lint_tests")
 load(
     "//tools/skylark:drake_cc.bzl",
     "drake_cc_binary",
@@ -11,17 +12,16 @@ load(
     "drake_py_unittest",
 )
 load(
+    "//tools/skylark:test_tags.bzl",
+    "gurobi_test_tags",
+    "mosek_test_tags",
+)
+load(
     ":defs.bzl",
     "drake_cc_optional_googletest",
     "drake_cc_optional_library",
     "drake_cc_variant_library",
 )
-load(
-    "//tools/skylark:test_tags.bzl",
-    "gurobi_test_tags",
-    "mosek_test_tags",
-)
-load("//tools/lint:lint.bzl", "add_lint_tests")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -68,6 +68,7 @@ drake_cc_package_library(
         ":scs_solver",
         ":sdpa_free_format",
         ":semidefinite_relaxation",
+        ":semidefinite_relaxation_internal",
         ":snopt_solver",
         ":solution_result",
         ":solve",
@@ -216,6 +217,7 @@ drake_cc_library(
     interface_deps = [
         ":decision_variable",
         ":evaluator_base",
+        ":sparse_and_dense_matrix",
     ],
     deps = [
         ":constraint",
@@ -660,6 +662,17 @@ drake_cc_library(
 )
 
 drake_cc_library(
+    name = "l2norm_cost_examples",
+    testonly = 1,
+    srcs = ["test/l2norm_cost_examples.cc"],
+    hdrs = ["test/l2norm_cost_examples.h"],
+    deps = [
+        ":mathematical_program_test_util",
+        "//common/test_utilities:eigen_matrix_compare",
+    ],
+)
+
+drake_cc_library(
     name = "semidefinite_program_examples",
     testonly = 1,
     srcs = ["test/semidefinite_program_examples.cc"],
@@ -805,12 +818,27 @@ drake_cc_variant_library(
         ":mathematical_program",
     ],
     deps_enabled = [
+        ":gurobi_solver_internal",
         "//math:eigen_sparse_triplet",
         "//common:find_resource",
         "//common:scope_exit",
         "//common:scoped_singleton",
         "@gurobi//:gurobi_c",
         "@fmt",
+    ],
+)
+
+drake_cc_optional_library(
+    name = "gurobi_solver_internal",
+    opt_in_condition = "//tools:with_gurobi",
+    srcs = ["gurobi_solver_internal.cc"],
+    hdrs = ["gurobi_solver_internal.h"],
+    interface_deps = [":mathematical_program_result"],
+    deps = [
+        ":aggregate_costs_constraints",
+        ":mathematical_program",
+        "//math:quadratic_form",
+        "@gurobi//:gurobi_c",
     ],
 )
 
@@ -898,13 +926,30 @@ drake_cc_variant_library(
     ],
 )
 
+drake_cc_optional_library(
+    name = "ipopt_solver_internal",
+    opt_out_condition = "//tools:no_ipopt",
+    srcs = ["ipopt_solver_internal.cc"],
+    hdrs = ["ipopt_solver_internal.h"],
+    deps = [
+        ":mathematical_program",
+        ":mathematical_program_result",
+        "//common:drake_export",
+        "@ipopt",
+    ],
+)
+
 drake_cc_variant_library(
     name = "ipopt_solver",
     opt_out_condition = "//tools:no_ipopt",
     srcs_always = ["ipopt_solver_common.cc"],
-    srcs_enabled = ["ipopt_solver.cc"],
+    srcs_enabled = [
+        "ipopt_solver.cc",
+    ],
     srcs_disabled = ["no_ipopt.cc"],
-    hdrs = ["ipopt_solver.h"],
+    hdrs = [
+        "ipopt_solver.h",
+    ],
     interface_deps = [
         ":solver_base",
     ],
@@ -912,6 +957,7 @@ drake_cc_variant_library(
         ":mathematical_program",
     ],
     deps_enabled = [
+        ":ipopt_solver_internal",
         "@ipopt",
         "//common:unused",
         "//math:autodiff",
@@ -1030,6 +1076,16 @@ drake_cc_library(
     name = "semidefinite_relaxation",
     srcs = ["semidefinite_relaxation.cc"],
     hdrs = ["semidefinite_relaxation.h"],
+    interface_deps = [
+        ":mathematical_program",
+        "//math:matrix_util",
+    ],
+)
+
+drake_cc_library(
+    name = "semidefinite_relaxation_internal",
+    srcs = ["semidefinite_relaxation_internal.cc"],
+    hdrs = ["semidefinite_relaxation_internal.h"],
     interface_deps = [
         ":mathematical_program",
         "//math:matrix_util",
@@ -1232,6 +1288,20 @@ drake_cc_googletest(
 )
 
 drake_cc_googletest(
+    name = "semidefinite_relaxation_internal_test",
+    deps = [
+        ":semidefinite_relaxation_internal",
+        ":solve",
+        "//common/test_utilities:eigen_matrix_compare",
+        "//common/test_utilities:expect_throws_message",
+        "//solvers:clarabel_solver",
+        "//solvers:csdp_solver",
+        "//solvers:mosek_solver",
+        "//solvers:scs_solver",
+    ],
+)
+
+drake_cc_googletest(
     name = "clp_solver_test",
     deps = [
         ":clp_solver",
@@ -1309,12 +1379,27 @@ drake_cc_googletest(
     ],
 )
 
+drake_cc_optional_googletest(
+    name = "gurobi_solver_internal_test",
+    opt_in_condition = "//tools:with_gurobi",
+    use_default_main = False,
+    deps = [
+        ":gurobi_solver",
+        ":gurobi_solver_internal",
+        "//common/test_utilities:eigen_matrix_compare",
+        "//common/test_utilities:symbolic_test_util",
+        "//math:quadratic_form",
+        "@gurobi//:gurobi_c",
+    ],
+)
+
 drake_cc_googletest(
     name = "gurobi_solver_test",
     tags = gurobi_test_tags(),
     use_default_main = False,
     deps = [
         ":gurobi_solver",
+        ":l2norm_cost_examples",
         ":linear_program_examples",
         ":mathematical_program",
         ":mathematical_program_test_util",
@@ -1364,6 +1449,28 @@ drake_cc_googletest(
         ":osqp_solver",
         ":solve",
     ],
+)
+
+drake_cc_googletest(
+    name = "ipopt_solver_internal_test",
+    copts = select({
+        "//conditions:default": [
+            "-DDRAKE_IPOPT_SOLVER_INTERNAL_TEST_HAS_IPOPT=1",
+        ],
+        "//tools:no_ipopt": [
+        ],
+    }),
+    deps = [
+        ":mathematical_program",
+        "//common/test_utilities:eigen_matrix_compare",
+    ] + select({
+        "//conditions:default": [
+            ":ipopt_solver_internal",
+            "@ipopt",
+        ],
+        "//tools:no_ipopt": [
+        ],
+    }),
 )
 
 drake_cc_googletest(
@@ -1484,6 +1591,7 @@ drake_cc_googletest(
     use_default_main = False,
     deps = [
         ":exponential_cone_program_examples",
+        ":l2norm_cost_examples",
         ":linear_program_examples",
         ":mathematical_program",
         ":mathematical_program_test_util",
@@ -1677,6 +1785,7 @@ drake_cc_googletest(
     deps = [
         ":clarabel_solver",
         ":exponential_cone_program_examples",
+        ":l2norm_cost_examples",
         ":linear_program_examples",
         ":mathematical_program",
         ":mathematical_program_test_util",
@@ -1692,6 +1801,7 @@ drake_cc_googletest(
     name = "scs_solver_test",
     deps = [
         ":exponential_cone_program_examples",
+        ":l2norm_cost_examples",
         ":linear_program_examples",
         ":mathematical_program",
         ":mathematical_program_test_util",

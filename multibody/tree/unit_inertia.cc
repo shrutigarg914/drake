@@ -223,14 +223,14 @@ UnitInertia<T> UnitInertia<T>::SolidTetrahedronAboutPoint(
   const Vector3<T> p_B0B1 = p1 - p0;  // Position from vertex B0 to vertex B1.
   const Vector3<T> p_B0B2 = p2 - p0;  // Position from vertex B0 to vertex B2.
   const Vector3<T> p_B0B3 = p3 - p0;  // Position from vertex B0 to vertex B3.
-  UnitInertia<T> G_BB0 =
+  const UnitInertia<T> G_BB0 =
       UnitInertia<T>::SolidTetrahedronAboutVertex(p_B0B1, p_B0B2, p_B0B3);
 
   // Shift unit inertia from about point B0 to about point A.
   const Vector3<T> p_B0Bcm = 0.25 * (p_B0B1 + p_B0B2 + p_B0B3);
   const Vector3<T>& p_AB0 = p0;  // Alias with monogram notation to clarify.
   const Vector3<T> p_ABcm = p_AB0 + p_B0Bcm;
-  RotationalInertia<T>& I_BA = G_BB0.ShiftToThenAwayFromCenterOfMassInPlace(
+  const RotationalInertia<T> I_BA = G_BB0.ShiftToThenAwayFromCenterOfMass(
       /* mass = */ 1, p_B0Bcm, p_ABcm);
   return UnitInertia<T>(I_BA);  // Returns G_BA (B's unit inertia about A).
 }
@@ -273,10 +273,11 @@ UnitInertia<T>::CalcPrincipalHalfLengthsAndAxesForEquivalentShape(
     double inertia_shape_factor) const {
   DRAKE_THROW_UNLESS(inertia_shape_factor > 0 && inertia_shape_factor <= 1);
   // The formulas below are derived for a shape D whose principal unit moments
-  // of inertia Gmin, Gmed, Gmax about Dcm (D's center of mass) have the form:
+  // of inertia Gmin, Gmed, Gmax about Dcm (D's center of mass) have the form:,
   // Gmin = inertia_shape_factor * (b² + c²)
   // Gmed = inertia_shape_factor * (a² + c²)
   // Gmax = inertia_shape_factor * (a² + b²)
+  // e.g., where a, b, c are ½ lengths of boxes or semi-axes of ellipsoids.
   // Casting these equations into matrix form, gives
   // ⌈0  1  1⌉ ⌈a²⌉   ⌈Gmin ⌉
   // |1  0  1⌉ |b²⌉ = |Gmed ⌉ / inertia_shape_factor
@@ -286,7 +287,9 @@ UnitInertia<T>::CalcPrincipalHalfLengthsAndAxesForEquivalentShape(
   // |b²⌉ = | 1 -1  1⌉ |Gmed ⌉ * 0.5 / inertia_shape_factor
   // ⌊c²⌋   ⌊ 1  1 -1⌋ ⌊Gmax ⌉
   // Since Gmin ≤ Gmed ≤ Gmax, we can deduce a² ≥ b² ≥ c², so we designate
-  // lmax² = a², lmed² = b², lmin² = c².
+  // lmax² = a² = 0.5 / inertia_shape_factor * (Gmed + Gmax - Gmin)
+  // lmed² = b² = 0.5 / inertia_shape_factor * (Gmin + Gmax - Gmed)
+  // lmin² = c² = 0.5 / inertia_shape_factor * (Gmin + Gmed - Gmax)
 
   // Form principal moments Gmoments and principal axes stored in R_EA.
   auto [Gmoments, R_EA] = this->CalcPrincipalMomentsAndAxesOfInertia();
@@ -304,7 +307,6 @@ UnitInertia<T>::CalcPrincipalHalfLengthsAndAxesForEquivalentShape(
   const double lmin = std::sqrt(lmin_squared);
   return std::pair(Vector3<double>(lmax, lmed, lmin), R_EA);
 }
-
 
 }  // namespace multibody
 }  // namespace drake

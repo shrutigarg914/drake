@@ -13,6 +13,7 @@
 #include "drake/geometry/optimization/hpolyhedron.h"
 #include "drake/geometry/optimization/intersection.h"
 #include "drake/geometry/optimization/point.h"
+#include "drake/math/autodiff_gradient.h"
 #include "drake/math/matrix_util.h"
 #include "drake/multibody/plant/multibody_plant.h"
 #include "drake/multibody/tree/planar_joint.h"
@@ -46,6 +47,8 @@ using geometry::optimization::Point;
 using geometry::optimization::internal::ComputeOffsetContinuousRevoluteJoints;
 using geometry::optimization::internal::GetMinimumAndMaximumValueAlongDimension;
 using geometry::optimization::internal::ThrowsForInvalidContinuousJointsList;
+using math::ExtractValue;
+using math::InitializeAutoDiff;
 using multibody::Joint;
 using multibody::JointIndex;
 using multibody::MultibodyPlant;
@@ -70,8 +73,137 @@ using Vertex = GraphOfConvexSets::Vertex;
 using Edge = GraphOfConvexSets::Edge;
 using VertexId = GraphOfConvexSets::VertexId;
 using EdgeId = GraphOfConvexSets::EdgeId;
+using Transcription = GraphOfConvexSets::Transcription;
 
 const double kInf = std::numeric_limits<double>::infinity();
+
+/* Implements a constraint of the form
+  0 <= - dᴺr(s) / dsᴺ - hᴺ * lb <= inf,
+  0 <= - dᴺr(s) / dsᴺ + hᴺ * ub <= inf,
+  where
+  N := derivative order,
+  h = x[num_control_points],
+  dᴺr(s) / dsᴺ = M * x[0:num_control_points].
+
+  This constraint is enforced along one dimension of the Bézier curve, hence
+  must be called for each dimension separately.
+*/
+class NonlinearDerivativeConstraint : public solvers::Constraint {
+ public:
+  NonlinearDerivativeConstraint(const Eigen::SparseMatrix<double>& M, double lb,
+                                double ub, int derivative_order)
+      : Constraint(2 * M.rows(), M.cols() + 1,
+                   Eigen::VectorXd::Zero(2 * M.rows()),
+                   Eigen::VectorXd::Constant(
+                       2 * M.rows(), std::numeric_limits<double>::infinity())),
+        M_(M),
+        lb_(Eigen::VectorXd::Constant(M.rows(), lb)),
+        ub_(Eigen::VectorXd::Constant(M.rows(), ub)),
+        derivative_order_(derivative_order),
+        num_control_points_(M.cols()) {
+    DRAKE_DEMAND(derivative_order > 1);
+  }
+
+  void DoEval(const Eigen::Ref<const Eigen::VectorXd>& x,
+              Eigen::VectorXd* y) const {
+    AutoDiffVecXd y_t;
+    Eval(InitializeAutoDiff(x), &y_t);
+    *y = ExtractValue(y_t);
+  }
+
+  void DoEval(const Eigen::Ref<const AutoDiffVecXd>& x,
+              AutoDiffVecXd* y) const {
+    // x is the stack [r_control.row(i); h].
+    AutoDiffXd pow_h = pow(x[num_control_points_], derivative_order_);
+
+    // Precompute Matrix Product.
+    AutoDiffVecXd Mx = M_ * x.head(num_control_points_);
+
+    y->head(M_.rows()) = Mx - pow_h * lb_;
+    y->tail(M_.rows()) = -Mx + pow_h * ub_;
+  }
+
+  void DoEval(const Eigen::Ref<const VectorX<symbolic::Variable>>&,
+              VectorX<symbolic::Expression>*) const {
+    throw std::runtime_error(
+        "NonlinearDerivativeConstraint does not support evaluation with "
+        "Expression.");
+  }
+
+ private:
+  const Eigen::SparseMatrix<double> M_;
+  const Eigen::VectorXd lb_;
+  const Eigen::VectorXd ub_;
+  const int derivative_order_;
+  const int num_control_points_;
+};
+
+/* Implements a constraint of the form
+  (dᴺrᵤ(s=1) / dsᴺ) * hᵥᴺ == (dᴺrᵥ(s=0) / dsᴺ) * hᵤᴺ
+  where
+  N := derivative order,
+  hᵤ = x[num_u_control_points],
+  hᵥ = x[num_u_control_points + num_v_control_points + 1],
+  dᴺrᵤ(s) / dsᴺ = Mu * x[0:num_u_control_points].
+  dᴺrᵥ(s) / dsᴺ = Mv * x[num_u_control_points + 1: -1].
+
+  This constraint is enforced along one dimension of the Bézier curve, hence
+  must be called for each dimension separately.
+*/
+class NonlinearContinuityConstraint : public solvers::Constraint {
+ public:
+  NonlinearContinuityConstraint(const Eigen::SparseMatrix<double>& Mu,
+                                const Eigen::SparseMatrix<double>& Mv,
+                                int continuity_order)
+      : Constraint(1, Mu.cols() + 1 + Mv.cols() + 1, Eigen::VectorXd::Zero(1),
+                   Eigen::VectorXd::Zero(1)),
+        Mu_(Mu),
+        Mv_(Mv),
+        continuity_order_(continuity_order),
+        num_control_points_u_(Mu.cols()),
+        num_control_points_v_(Mv.cols()) {
+    DRAKE_DEMAND(Mu.rows() == 1);
+    DRAKE_DEMAND(Mv.rows() == 1);
+    DRAKE_DEMAND(continuity_order >= 1);
+  }
+
+  void DoEval(const Eigen::Ref<const Eigen::VectorXd>& x,
+              Eigen::VectorXd* y) const {
+    AutoDiffVecXd y_t;
+    Eval(InitializeAutoDiff(x), &y_t);
+    *y = ExtractValue(y_t);
+  }
+
+  void DoEval(const Eigen::Ref<const AutoDiffVecXd>& x,
+              AutoDiffVecXd* y) const {
+    // x is the stack [r_control_u.row(i); h_u; r_control_v.row(i); h_v;].
+    AutoDiffXd pow_h_u = pow(x[num_control_points_u_], continuity_order_);
+    AutoDiffXd pow_h_v =
+        pow(x[num_control_points_u_ + num_control_points_v_ + 1],
+            continuity_order_);
+
+    // Precompute Matrix Products.
+    AutoDiffXd Mu_x = Mu_.row(0) * x.head(num_control_points_u_);
+    AutoDiffXd Mv_x = Mv_.row(0) * x.segment(num_control_points_u_ + 1,
+                                             num_control_points_v_);
+
+    (*y)[0] = Mu_x * pow_h_v - Mv_x * pow_h_u;
+  }
+
+  void DoEval(const Eigen::Ref<const VectorX<symbolic::Variable>>&,
+              VectorX<symbolic::Expression>*) const {
+    throw std::runtime_error(
+        "NonlinearContinuityConstraint does not support evaluation with "
+        "Expression.");
+  }
+
+ private:
+  const Eigen::SparseMatrix<double> Mu_;
+  const Eigen::SparseMatrix<double> Mv_;
+  const int continuity_order_;
+  const int num_control_points_u_;
+  const int num_control_points_v_;
+};
 
 Subgraph::Subgraph(
     const ConvexSets& regions,
@@ -276,6 +408,99 @@ void Subgraph::AddVelocityBounds(const Eigen::Ref<const VectorXd>& lb,
   }
 }
 
+void Subgraph::AddNonlinearDerivativeBounds(
+    const Eigen::Ref<const Eigen::VectorXd>& lb,
+    const Eigen::Ref<const Eigen::VectorXd>& ub, int derivative_order) {
+  DRAKE_THROW_UNLESS(lb.size() == num_positions());
+  DRAKE_THROW_UNLESS(ub.size() == num_positions());
+
+  if (derivative_order > order()) {
+    throw std::runtime_error(
+        "Derivative order must be less than or equal to the set order.");
+  }
+
+  if (derivative_order == 1) {
+    throw std::runtime_error(
+        "Use AddVelocityBounds instead of AddNonlinearDerivativeBounds with "
+        "derivative_order=1; velocity bounds are linear.");
+  }
+
+  if (derivative_order < 1) {
+    throw std::runtime_error("Derivative order must be greater than 1.");
+  }
+
+  // The nonlinear derivative dᴺq(t) / dtᴺ = dᴺr(s) / dsᴺ / hᴺ, with h >= 0,
+  // can be written as hᴺ * lb <= dᴺr(s) / dsᴺ <= hᴺ * ub, and constrained as:
+  // 0 <=   dᴺr(s) / dsᴺ - hᴺ * lb <= inf,
+  // 0 <= - dᴺr(s) / dsᴺ + hᴺ * ub <= inf.
+
+  // The nonlinear constraint will be enforced in the restriction and MIP
+  // of GCS, while a convex surrogate in the relaxation transcription will
+  // guide the rounding process.
+
+  // Since hᴺ is the source of nonlinearities, we will replace it with:
+  // h₀ᴺ⁻¹h
+  // Then we will get the following linear constraint:
+  // 0 <=   dᴺr(s) / dsᴺ - h₀ᴺ⁻¹h * lb <= inf
+  // 0 <= - dᴺr(s) / dsᴺ + h₀ᴺ⁻¹h * ub <= inf.
+
+  // For simplicity sake, we will set h₀ to one until we come up with a
+  // reasonable heuristic, e.g. based on the maximum length of the convex set.
+  const double h0 = 1.0;
+
+  // This leverages the convex hull property of the B-splines: if all of the
+  // control points satisfy these convex constraints and the curve is inside
+  // the convex hull of these constraints, then the curve satisfies the
+  // constraints for all t.
+
+  // The relevant derivatives of the Bezier curve come in the form:
+  // rdot_control.row(i).T = M.T * r_control.row(i).T, so we loop over the
+  // positions, rather than over the control points.
+  solvers::VectorXDecisionVariable vars(order_ + 2);
+  SparseMatrix<double> M_transpose =
+      r_trajectory_.AsLinearInControlPoints(derivative_order).transpose();
+
+  // Lower bound: 0 <=   (dᴺr(s) / dsᴺ).row(i) - h₀ᴺ⁻¹h * lb[i] <= inf,
+  // Upper bound: 0 <= - (dᴺr(s) / dsᴺ).row(i) + h₀ᴺ⁻¹h * ub[i] <= inf.
+
+  int rdot_control_points = order_ + 1 - derivative_order;
+  const VectorXd kVecInf = VectorXd::Constant(2 * rdot_control_points, kInf);
+  const VectorXd kVecZero = VectorXd::Zero(2 * rdot_control_points);
+  Eigen::MatrixXd H(
+      2 * rdot_control_points,
+      order_ + 2);  // number of control points for one row of r(s) + 1
+  H.block(0, 0, M_transpose.rows(), M_transpose.cols()) = M_transpose;
+  H.block(M_transpose.rows(), 0, M_transpose.rows(), M_transpose.cols()) =
+      -M_transpose;
+
+  for (int i = 0; i < num_positions(); ++i) {
+    // Update the bounds for each position.
+    H.block(0, order_ + 1, rdot_control_points, 1) = VectorXd::Constant(
+        rdot_control_points, -std::pow(h0, derivative_order - 1) * lb[i]);
+    H.block(rdot_control_points, order_ + 1, rdot_control_points, 1) =
+        VectorXd::Constant(rdot_control_points,
+                           std::pow(h0, derivative_order - 1) * ub[i]);
+
+    const auto normalized_path_derivative_constraint =
+        std::make_shared<LinearConstraint>(H.sparseView(), kVecZero, kVecInf);
+
+    const auto nonlinear_derivative_constraint =
+        std::make_shared<NonlinearDerivativeConstraint>(
+            M_transpose, lb[i], ub[i], derivative_order);
+    for (Vertex* v : vertices_) {
+      vars << GetControlPoints(*v).row(i).transpose(), GetTimeScaling(*v);
+      // Add convex surrogate.
+      v->AddConstraint(Binding<LinearConstraint>(
+                           normalized_path_derivative_constraint, vars),
+                       {Transcription::kRelaxation});
+      // Add nonlinear constraint.
+      v->AddConstraint(Binding<NonlinearDerivativeConstraint>(
+                           nonlinear_derivative_constraint, vars),
+                       {Transcription::kMIP, Transcription::kRestriction});
+    }
+  }
+}
+
 void Subgraph::AddPathContinuityConstraints(int continuity_order) {
   if (continuity_order == 0) {
     throw std::runtime_error(
@@ -332,6 +557,95 @@ void Subgraph::AddPathContinuityConstraints(int continuity_order) {
   }
 }
 
+void Subgraph::AddContinuityConstraints(int continuity_order) {
+  if (continuity_order == 0) {
+    throw std::runtime_error(
+        "Path continuity is enforced by default. Choose a higher order.");
+  }
+  if (continuity_order < 1) {
+    throw std::runtime_error("Order must be greater than or equal to 1.");
+  }
+
+  if (continuity_order > order_) {
+    throw std::runtime_error(
+        "Cannot add continuity constraint of order greater than the set "
+        "order.");
+  }
+
+  // The continuity on derivatives of q(t) will be enforced between the last
+  // control point of the u set and the first control point of the v set in an
+  // edge.
+
+  // Since the derivative of q(t) appears nonlinear in h, the following
+  // nonlinear constraint will be enforced on the MIP and the restriction:
+  // (dᴺrᵤ(s=1) / dsᴺ) / hᵤᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥᴺ.
+
+  // Which can be written as:
+  // urdot_control.col(order-N) * hᵥᴺ - vrdot_control.col(0) * hᵤᴺ = 0.
+  SparseMatrix<double> Mu_transpose =
+      r_trajectory_.AsLinearInControlPoints(continuity_order)
+          .col(order_ - continuity_order)
+          .transpose();
+
+  SparseMatrix<double> Mv_transpose =
+      r_trajectory_.AsLinearInControlPoints(continuity_order)
+          .col(0)
+          .transpose();
+
+  const auto nonlinear_continuity_constraint =
+      std::make_shared<NonlinearContinuityConstraint>(
+          Mu_transpose, Mv_transpose, continuity_order);
+  solvers::VectorXDecisionVariable vars(2 * (order_ + 2));
+
+  // Since hᵤᴺ, hᵥᴺ is the source of nonlinearities, we will replace it with
+  // hᵤ₀ᴺ and hᵥ₀ᴺ, which are the characteristic times of the respective sets:
+  // (dᴺrᵤ(s=1) / dsᴺ) / hᵤ₀ᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥ₀ᴺ.
+
+  // Then we will get the following linear equality constraint as a surrogate:
+  // urdot_control.col(order-N) * hᵥ₀ᴺ - vrdot_control.col(0) * hᵤ₀ᴺ = 0.
+
+  // For simplicity sake, we will set hᵤ₀ and hᵥ₀ to one until we come up with a
+  // reasonable heuristic, e.g. based on the maximum length of the convex set.
+
+  const double hu0 = 1.0;
+  const double hv0 = 1.0;
+
+  // The latter can be achieved by getting the control point matrix M.
+  // A = [Mu.col(order - continuity_order).T * hᵥ₀, -Mv.col(0).T * hᵤ₀],
+  // x = [u_controls.row(i); v_controls.row(i)].
+  // Ax = 0,
+
+  // The A matrix will have one row since sparsity allows us to enforce the
+  // continuity in each dimension. The number of columns matches the number of
+  // control points for one row of r_u(s) and r_v(s).
+  SparseMatrix<double> A(1, 2 * (order_ + 1));
+  A.leftCols(order_ + 1) = Mu_transpose * hv0;
+  A.rightCols(order_ + 1) = -Mv_transpose * hu0;
+
+  const auto path_continuity_constraint =
+      std::make_shared<LinearEqualityConstraint>(A, VectorXd::Zero(1));
+
+  for (int i = 0; i < num_positions(); ++i) {
+    for (Edge* edge : edges_) {
+      // Add convex surrogate.
+      edge->AddConstraint(
+          Binding<LinearEqualityConstraint>(
+              path_continuity_constraint, {GetControlPoints(edge->u()).row(i),
+                                           GetControlPoints(edge->v()).row(i)}),
+          {Transcription::kRelaxation});
+
+      // Add nonlinear constraint.
+      vars << GetControlPoints(edge->u()).row(i).transpose(),
+          GetTimeScaling(edge->u()),
+          GetControlPoints(edge->v()).row(i).transpose(),
+          GetTimeScaling(edge->v());
+      edge->AddConstraint(Binding<NonlinearContinuityConstraint>(
+                              nonlinear_continuity_constraint, vars),
+                          {Transcription::kMIP, Transcription::kRestriction});
+    }
+  }
+}
+
 Eigen::Map<const MatrixX<symbolic::Variable>> Subgraph::GetControlPoints(
     const geometry::optimization::GraphOfConvexSets::Vertex& v) const {
   DRAKE_DEMAND(v.x().size() == num_positions() * (order_ + 1) + 1);
@@ -349,8 +663,8 @@ EdgesBetweenSubgraphs::EdgesBetweenSubgraphs(
     const Subgraph& from_subgraph, const Subgraph& to_subgraph,
     const ConvexSet* subspace, GcsTrajectoryOptimization* traj_opt)
     : traj_opt_(*traj_opt),
-      from_subgraph_order_(from_subgraph.order()),
-      to_subgraph_order_(to_subgraph.order()) {
+      from_subgraph_(from_subgraph),
+      to_subgraph_(to_subgraph) {
   // Formulate edge costs and constraints.
   if (subspace != nullptr) {
     if (subspace->ambient_dimension() != num_positions()) {
@@ -364,9 +678,9 @@ EdgesBetweenSubgraphs::EdgesBetweenSubgraphs(
   }
 
   ur_trajectory_ = BezierCurve<double>(
-      0, 1, MatrixXd::Zero(num_positions(), from_subgraph_order_ + 1));
+      0, 1, MatrixXd::Zero(num_positions(), from_subgraph_.order() + 1));
   vr_trajectory_ = BezierCurve<double>(
-      0, 1, MatrixXd::Zero(num_positions(), to_subgraph_order_ + 1));
+      0, 1, MatrixXd::Zero(num_positions(), to_subgraph_.order() + 1));
 
   // Zeroth order continuity constraints.
   //  ur_control.col(-1) == vr_control.col(0).
@@ -426,12 +740,12 @@ EdgesBetweenSubgraphs::EdgesBetweenSubgraphs(
     uv_edge->AddConstraint(Binding<Constraint>(
         path_continuity_constraint,
         ConcatenateVariableRefList(
-            {GetControlPointsU(*uv_edge).col(from_subgraph_order_),
+            {GetControlPointsU(*uv_edge).col(from_subgraph_.order()),
              GetControlPointsV(*uv_edge).col(0)})));
 
     if (subspace != nullptr) {
       // Add subspace constraints to the last control point of the u vertex.
-      const auto vars = GetControlPointsU(*uv_edge).col(from_subgraph_order_);
+      const auto vars = GetControlPointsU(*uv_edge).col(from_subgraph_.order());
 
       // subspace will either be a Point or HPolyhedron. We check if it's a
       // Point via the method ConvexSet::MaybeGetPoint(), which will return a
@@ -457,7 +771,7 @@ EdgesBetweenSubgraphs::EdgesBetweenSubgraphs(
         prog.AddLinearConstraint(
             hpoly_A,
             Eigen::VectorXd::Constant(hpoly_b.size(),
-                                      std::numeric_limits<double>::infinity()),
+                                      -std::numeric_limits<double>::infinity()),
             hpoly_b - (hpoly_A * sets_A_subspace_offset[i]), x);
         for (const auto& binding : prog.GetAllConstraints()) {
           const std::shared_ptr<Constraint>& constraint = binding.evaluator();
@@ -554,32 +868,32 @@ void EdgesBetweenSubgraphs::AddVelocityBounds(
   const Vector1d kVecInf = Vector1d::Constant(kInf);
   const Vector1d kVecZero = Vector1d::Zero();
 
-  if (from_subgraph_order_ == 0 && to_subgraph_order_ == 0) {
+  if (from_subgraph_.order() == 0 && to_subgraph_.order() == 0) {
     throw std::runtime_error(
         "Cannot add velocity bounds to a subgraph edges where both subgraphs "
         "have zero order.");
   }
 
-  if (from_subgraph_order_ > 0) {
+  if (from_subgraph_.order() > 0) {
     // Add velocity bounds to the last control point of the u set.
     // See BezierCurve::AsLinearInControlPoints().
-    solvers::VectorXDecisionVariable vars(from_subgraph_order_ + 2);
+    solvers::VectorXDecisionVariable vars(from_subgraph_.order() + 2);
     SparseMatrix<double> m = ur_trajectory_.AsLinearInControlPoints(1)
-                                 .col(from_subgraph_order_ - 1)
+                                 .col(from_subgraph_.order() - 1)
                                  .transpose();
     SparseMatrix<double> H_lb(
         1 /* we are only constraining the last point in the u set */,
-        from_subgraph_order_ +
+        from_subgraph_.order() +
             2 /* number of control points for one row of r(s) + 1*/);
-    H_lb.leftCols(from_subgraph_order_ + 1) = m;
+    H_lb.leftCols(from_subgraph_.order() + 1) = m;
     SparseMatrix<double> H_ub = H_lb;
     for (int i = 0; i < num_positions(); ++i) {
       // Lower bound.  0 <= ṙ(s).row(i) - h * lb <= inf.
-      H_lb.coeffRef(0, from_subgraph_order_ + 1) = -lb[i];
+      H_lb.coeffRef(0, from_subgraph_.order() + 1) = -lb[i];
       const auto lb_constraint =
           std::make_shared<LinearConstraint>(H_lb, kVecZero, kVecInf);
       // Upper bound. -inf <= ṙ(s).row(i) - h * ub <= 0.
-      H_ub.coeffRef(0, from_subgraph_order_ + 1) = -ub[i];
+      H_ub.coeffRef(0, from_subgraph_.order() + 1) = -ub[i];
       const auto ub_constraint =
           std::make_shared<LinearConstraint>(H_ub, -kVecInf, kVecZero);
       for (Edge* edge : edges_) {
@@ -592,25 +906,25 @@ void EdgesBetweenSubgraphs::AddVelocityBounds(
     }
   }
 
-  if (to_subgraph_order_ > 0) {
+  if (to_subgraph_.order() > 0) {
     // Add velocity bounds to the first control point of the v set.
     // See Subgraph::AddVelocityBounds().
-    solvers::VectorXDecisionVariable vars(to_subgraph_order_ + 2);
+    solvers::VectorXDecisionVariable vars(to_subgraph_.order() + 2);
     SparseMatrix<double> m =
         vr_trajectory_.AsLinearInControlPoints(1).col(0).transpose();
     SparseMatrix<double> H_lb(
         1 /* we are only constraining the last point in the u set */,
-        to_subgraph_order_ +
+        to_subgraph_.order() +
             2 /* number of control points for one row of r(s) + 1*/);
-    H_lb.leftCols(to_subgraph_order_ + 1) = m;
+    H_lb.leftCols(to_subgraph_.order() + 1) = m;
     SparseMatrix<double> H_ub = H_lb;
     for (int i = 0; i < num_positions(); ++i) {
       // Lower bound.  0 <= ṙ(s).row(i) - h * lb <= inf.
-      H_lb.coeffRef(0, to_subgraph_order_ + 1) = -lb[i];
+      H_lb.coeffRef(0, to_subgraph_.order() + 1) = -lb[i];
       const auto lb_constraint =
           std::make_shared<LinearConstraint>(H_lb, kVecZero, kVecInf);
       // Upper bound. -inf <= ṙ(s).row(i) - h * ub <= 0.
-      H_ub.coeffRef(0, to_subgraph_order_ + 1) = -ub[i];
+      H_ub.coeffRef(0, to_subgraph_.order() + 1) = -ub[i];
       const auto ub_constraint =
           std::make_shared<LinearConstraint>(H_ub, -kVecInf, kVecZero);
       for (Edge* edge : edges_) {
@@ -619,6 +933,196 @@ void EdgesBetweenSubgraphs::AddVelocityBounds(
             GetTimeScalingV(*edge);
         edge->AddConstraint(Binding<LinearConstraint>(lb_constraint, vars));
         edge->AddConstraint(Binding<LinearConstraint>(ub_constraint, vars));
+      }
+    }
+  }
+}
+
+void EdgesBetweenSubgraphs::AddNonlinearDerivativeBounds(
+    const Eigen::Ref<const Eigen::VectorXd>& lb,
+    const Eigen::Ref<const Eigen::VectorXd>& ub, int derivative_order) {
+  DRAKE_THROW_UNLESS(lb.size() == num_positions());
+  DRAKE_THROW_UNLESS(ub.size() == num_positions());
+
+  if (derivative_order < 1) {
+    throw std::runtime_error("Derivative order must be greater than 1.");
+  }
+
+  if (derivative_order == 1) {
+    throw std::runtime_error(
+        "Use AddVelocityBounds instead of AddNonlinearDerivativeBounds with "
+        "derivative_order=1; velocity bounds are linear.");
+  }
+
+  if (derivative_order > from_subgraph_.order() &&
+      derivative_order > to_subgraph_.order()) {
+    throw std::runtime_error(fmt::format(
+        "Cannot add derivative bounds to subgraph edges where both subgraphs "
+        "have less than derivative order.\n From subgraph order: {}\n To "
+        "subgraph order: {}\n Derivative order: {}",
+        from_subgraph_.order(), to_subgraph_.order(), derivative_order));
+  }
+
+  // See see Subgraph::AddNonlinearDerivativeBounds for details on how the
+  // nonlinear derivative constraints are formulated.
+
+  // We will enforce the derivative bounds on the last control point of the u
+  // set and on the first control point of the v set unless one of the sets
+  // order is less than the derivative order.
+  const VectorXd kVecInf = VectorXd::Constant(2, kInf);
+  const VectorXd kVecZero = VectorXd::Zero(2);
+  const double h0 = 1.0;
+
+  if (from_subgraph_.order() >= derivative_order) {
+    // Add derivative bounds to the last control point of the u set.
+    // See BezierCurve::AsLinearInControlPoints().
+
+    solvers::VectorXDecisionVariable vars(from_subgraph_.order() + 2);
+    SparseMatrix<double> M_transpose =
+        ur_trajectory_.AsLinearInControlPoints(derivative_order)
+            .col(from_subgraph_.order() - derivative_order)
+            .transpose();
+
+    Eigen::MatrixXd H(
+        2 /* we are only constraining the last point in the u set */,
+        from_subgraph_.order() +
+            2 /* number of control points for one row of r(s) + 1*/);
+    H.block(0, 0, 1, from_subgraph_.order() + 1) = M_transpose;
+    H.block(1, 0, 1, from_subgraph_.order() + 1) = -M_transpose;
+
+    for (int i = 0; i < num_positions(); ++i) {
+      // Lower bound: 0 <=   (dᴺr(s=1) / dsᴺ).row(i) - h₀ᴺ⁻¹ h * lb[i] <= inf,
+      // Upper bound: 0 <= - (dᴺr(s=1) / dsᴺ).row(i) + h₀ᴺ⁻¹ h * ub[i] <= inf.
+      H(0, from_subgraph_.order() + 1) =
+          -std::pow(h0, derivative_order - 1) * lb[i];
+      H(1, from_subgraph_.order() + 1) =
+          std::pow(h0, derivative_order - 1) * ub[i];
+      const auto convex_derivative_constraint =
+          std::make_shared<LinearConstraint>(H.sparseView(), kVecZero, kVecInf);
+
+      const auto nonlinear_derivative_constraint =
+          std::make_shared<NonlinearDerivativeConstraint>(
+              M_transpose, lb[i], ub[i], derivative_order);
+      for (Edge* edge : edges_) {
+        vars << GetControlPointsU(*edge).row(i).transpose(),
+            GetTimeScalingU(*edge);
+        // Add convex surrogate.
+        edge->AddConstraint(
+            Binding<LinearConstraint>(convex_derivative_constraint, vars),
+            {Transcription::kRelaxation});
+        // Add nonlinear constraint.
+        edge->AddConstraint(Binding<NonlinearDerivativeConstraint>(
+                                nonlinear_derivative_constraint, vars),
+                            {Transcription::kMIP, Transcription::kRestriction});
+      }
+    }
+  }
+
+  if (to_subgraph_.order() >= derivative_order) {
+    // Add velocity bounds to the first control point of the v set.
+    // See BezierCurve::AsLinearInControlPoints().
+
+    solvers::VectorXDecisionVariable vars(to_subgraph_.order() + 2);
+    SparseMatrix<double> M_transpose =
+        vr_trajectory_.AsLinearInControlPoints(derivative_order)
+            .col(0)
+            .transpose();
+
+    Eigen::MatrixXd H(
+        2 /* we are only constraining the last point in the v set */,
+        to_subgraph_.order() +
+            2 /* number of control points for one row of r(s) + 1*/);
+    H.block(0, 0, 1, to_subgraph_.order() + 1) = M_transpose;
+    H.block(1, 0, 1, to_subgraph_.order() + 1) = -M_transpose;
+
+    for (int i = 0; i < num_positions(); ++i) {
+      // Lower bound: 0 <=   (dᴺr(s=0) / dsᴺ).row(i) - h₀ᴺ⁻¹h * lb[i] <= inf,
+      // Upper bound: 0 <= - (dᴺr(s=0) / dsᴺ).row(i) + h₀ᴺ⁻¹h * ub[i] <= inf.
+      H(0, to_subgraph_.order() + 1) =
+          -std::pow(h0, derivative_order - 1) * lb[i];
+      H(1, to_subgraph_.order() + 1) =
+          std::pow(h0, derivative_order - 1) * ub[i];
+      const auto convex_derivative_constraint =
+          std::make_shared<LinearConstraint>(H.sparseView(), kVecZero, kVecInf);
+
+      const auto nonlinear_derivative_constraint =
+          std::make_shared<NonlinearDerivativeConstraint>(
+              M_transpose, lb[i], ub[i], derivative_order);
+      for (Edge* edge : edges_) {
+        vars << GetControlPointsV(*edge).row(i).transpose(),
+            GetTimeScalingU(*edge);
+        // Add convex surrogate.
+        edge->AddConstraint(
+            Binding<LinearConstraint>(convex_derivative_constraint, vars),
+            {Transcription::kRelaxation});
+        // Add nonlinear constraint.
+        edge->AddConstraint(Binding<NonlinearDerivativeConstraint>(
+                                nonlinear_derivative_constraint, vars),
+                            {Transcription::kMIP, Transcription::kRestriction});
+      }
+    }
+  }
+}
+
+void EdgesBetweenSubgraphs::AddZeroDerivativeConstraints(int derivative_order) {
+  if (derivative_order < 1) {
+    throw std::runtime_error("Derivative order must be greater than 1.");
+  }
+
+  if (derivative_order > from_subgraph_.order() &&
+      derivative_order > to_subgraph_.order()) {
+    throw std::runtime_error(fmt::format(
+        "Cannot add derivative bounds to subgraph edges where both subgraphs "
+        "have less than derivative order.\n From subgraph order: {}\n To "
+        "subgraph order: {}\n Derivative order: {}",
+        from_subgraph_.order(), to_subgraph_.order(), derivative_order));
+  }
+
+  // We have dᴺq(t) / dtᴺ = dᴺr(s)/(dsᴺ * hᴺ) and h >= 0, which is nonlinear.
+  // To constraint zero velocity we can set the numerator to zero, which is
+  // convex:
+  // dᴺr(s) / dsᴺ = 0.
+
+  const Vector1d kVecZero = Vector1d::Zero();
+
+  if (from_subgraph_.order() >= derivative_order) {
+    // Add derivative bounds to the last control point of the u set.
+    // See BezierCurve::AsLinearInControlPoints().
+    SparseMatrix<double> M_transpose =
+        ur_trajectory_.AsLinearInControlPoints(derivative_order)
+            .col(from_subgraph_.order() - derivative_order)
+            .transpose();
+
+    // Equality constraint.
+    // (dᴺr(s) / dsᴺ).row(i) = 0.
+    const auto zero_derivative_constraint =
+        std::make_shared<LinearEqualityConstraint>(M_transpose, kVecZero);
+    for (int i = 0; i < num_positions(); ++i) {
+      for (Edge* edge : edges_) {
+        edge->AddConstraint(Binding<LinearEqualityConstraint>(
+            zero_derivative_constraint,
+            GetControlPointsU(*edge).row(i).transpose()));
+      }
+    }
+  }
+
+  if (to_subgraph_.order() >= derivative_order) {
+    // Add derivative bounds to the first control point of the v set.
+    // See BezierCurve::AsLinearInControlPoints().
+    SparseMatrix<double> M_transpose =
+        vr_trajectory_.AsLinearInControlPoints(derivative_order)
+            .col(0)
+            .transpose();
+    // Equality constraint:
+    // (dᴺr(s) / dsᴺ).row(i) = 0.
+    const auto zero_derivative_constraint =
+        std::make_shared<LinearEqualityConstraint>(M_transpose, kVecZero);
+
+    for (int i = 0; i < num_positions(); ++i) {
+      for (Edge* edge : edges_) {
+        edge->AddConstraint(Binding<LinearEqualityConstraint>(
+            zero_derivative_constraint,
+            GetControlPointsV(*edge).row(i).transpose()));
       }
     }
   }
@@ -633,8 +1137,8 @@ void EdgesBetweenSubgraphs::AddPathContinuityConstraints(int continuity_order) {
     throw std::runtime_error("Order must be greater than or equal to 1.");
   }
 
-  if (from_subgraph_order_ < continuity_order ||
-      to_subgraph_order_ < continuity_order) {
+  if (continuity_order > from_subgraph_.order() ||
+      continuity_order > to_subgraph_.order()) {
     throw std::runtime_error(
         "Cannot add continuity constraint to a subgraph edge where both "
         "subgraphs order are not greater than or equal to the requested "
@@ -645,13 +1149,13 @@ void EdgesBetweenSubgraphs::AddPathContinuityConstraints(int continuity_order) {
   // control point of the u set and the first control point of the v set in an
   // edge. urdot_control.col(order-continuity_order) - vrdot_control.col(0) = 0,
   // The latter can be achieved by getting the control point matrix M.
-  // A = [M.col(from_subgraph_order - continuity_order).T, -M.col(0).T],
+  // A = [M.col(from_subgraph.order() - continuity_order).T, -M.col(0).T],
   // x = [u_controls.row(i); v_controls.row(i)].
   // Ax = 0,
 
   SparseMatrix<double> Mu_transpose =
       ur_trajectory_.AsLinearInControlPoints(continuity_order)
-          .col(from_subgraph_order_ - continuity_order)
+          .col(from_subgraph_.order() - continuity_order)
           .transpose();
 
   SparseMatrix<double> Mv_transpose =
@@ -665,10 +1169,10 @@ void EdgesBetweenSubgraphs::AddPathContinuityConstraints(int continuity_order) {
   // The A matrix will have one row since sparsity allows us to enforce the
   // continuity in each dimension. The number of columns matches the number of
   // control points for one row of r_u(s) and r_v(s).
-  SparseMatrix<double> A(1,
-                         (from_subgraph_order_ + 1) + (to_subgraph_order_ + 1));
-  A.leftCols(from_subgraph_order_ + 1) = Mu_transpose;
-  A.rightCols(to_subgraph_order_ + 1) = -Mv_transpose;
+  SparseMatrix<double> A(
+      1, (from_subgraph_.order() + 1) + (to_subgraph_.order() + 1));
+  A.leftCols(from_subgraph_.order() + 1) = Mu_transpose;
+  A.rightCols(to_subgraph_.order() + 1) = -Mv_transpose;
 
   const auto continuity_constraint =
       std::make_shared<LinearEqualityConstraint>(A, VectorXd::Zero(1));
@@ -683,33 +1187,109 @@ void EdgesBetweenSubgraphs::AddPathContinuityConstraints(int continuity_order) {
   }
 }
 
+void EdgesBetweenSubgraphs::AddContinuityConstraints(int continuity_order) {
+  if (continuity_order == 0) {
+    throw std::runtime_error(
+        "Path continuity is enforced by default. Choose a higher order.");
+  }
+  if (continuity_order < 1) {
+    throw std::runtime_error("Order must be greater than or equal to 1.");
+  }
+
+  if (continuity_order > from_subgraph_.order() ||
+      continuity_order > to_subgraph_.order()) {
+    throw std::runtime_error(
+        "Cannot add continuity constraint to a subgraph edge where both "
+        "subgraphs order are not greater than or equal to the requested "
+        "continuity order.");
+  }
+
+  // See see Subgraph::AddContinuityConstraints for details on how the
+  // nonlinear derivative constraints are formulated.
+
+  // The continuity on derivatives of q(s) will be enforced between the last
+  // control point of the u set and the first control point of the v set in an
+  // edge.
+
+  const double hu0 = 1.0;
+  const double hv0 = 1.0;
+
+  SparseMatrix<double> Mu_transpose =
+      ur_trajectory_.AsLinearInControlPoints(continuity_order)
+          .col(from_subgraph_.order() - continuity_order)
+          .transpose();
+
+  SparseMatrix<double> Mv_transpose =
+      vr_trajectory_.AsLinearInControlPoints(continuity_order)
+          .col(0)
+          .transpose();
+
+  const auto nonlinear_continuity_constraint =
+      std::make_shared<NonlinearContinuityConstraint>(
+          Mu_transpose, Mv_transpose, continuity_order);
+  solvers::VectorXDecisionVariable vars(from_subgraph_.order() + 2 +
+                                        to_subgraph_.order() + 2);
+
+  // The A matrix will have one row since sparsity allows us to enforce the
+  // continuity in each dimension. The number of columns matches the number of
+  // control points for one row of r_u(s) and r_v(s).
+  SparseMatrix<double> A(
+      1, (from_subgraph_.order() + 1) + (to_subgraph_.order() + 1));
+  A.leftCols(from_subgraph_.order() + 1) = Mu_transpose * hv0;
+  A.rightCols(to_subgraph_.order() + 1) = -Mv_transpose * hu0;
+
+  const auto path_continuity_constraint =
+      std::make_shared<LinearEqualityConstraint>(A, VectorXd::Zero(1));
+
+  for (int i = 0; i < num_positions(); ++i) {
+    for (Edge* edge : edges_) {
+      // Add convex surrogate.
+      edge->AddConstraint(
+          Binding<LinearEqualityConstraint>(path_continuity_constraint,
+                                            {GetControlPointsU(*edge).row(i),
+                                             GetControlPointsV(*edge).row(i)}),
+          {Transcription::kRelaxation});
+
+      // Add nonlinear constraint.
+      vars << GetControlPointsU(*edge).row(i).transpose(),
+          GetTimeScalingU(*edge), GetControlPointsV(*edge).row(i).transpose(),
+          GetTimeScalingV(*edge);
+      edge->AddConstraint(Binding<NonlinearContinuityConstraint>(
+                              nonlinear_continuity_constraint, vars),
+                          {Transcription::kMIP, Transcription::kRestriction});
+    }
+  }
+}
+
 Eigen::Map<const MatrixX<symbolic::Variable>>
 EdgesBetweenSubgraphs::GetControlPointsU(
     const geometry::optimization::GraphOfConvexSets::Edge& e) const {
   DRAKE_DEMAND(e.xu().size() ==
-               num_positions() * (from_subgraph_order_ + 1) + 1);
+               num_positions() * (from_subgraph_.order() + 1) + 1);
   return Eigen::Map<const MatrixX<symbolic::Variable>>(
-      e.xu().data(), num_positions(), from_subgraph_order_ + 1);
+      e.xu().data(), num_positions(), from_subgraph_.order() + 1);
 }
 
 Eigen::Map<const MatrixX<symbolic::Variable>>
 EdgesBetweenSubgraphs::GetControlPointsV(
     const geometry::optimization::GraphOfConvexSets::Edge& e) const {
-  DRAKE_DEMAND(e.xv().size() == num_positions() * (to_subgraph_order_ + 1) + 1);
+  DRAKE_DEMAND(e.xv().size() ==
+               num_positions() * (to_subgraph_.order() + 1) + 1);
   return Eigen::Map<const MatrixX<symbolic::Variable>>(
-      e.xv().data(), num_positions(), to_subgraph_order_ + 1);
+      e.xv().data(), num_positions(), to_subgraph_.order() + 1);
 }
 
 symbolic::Variable EdgesBetweenSubgraphs::GetTimeScalingU(
     const geometry::optimization::GraphOfConvexSets::Edge& e) const {
   DRAKE_DEMAND(e.xu().size() ==
-               num_positions() * (from_subgraph_order_ + 1) + 1);
+               num_positions() * (from_subgraph_.order() + 1) + 1);
   return e.xu()(e.xu().size() - 1);
 }
 
 symbolic::Variable EdgesBetweenSubgraphs::GetTimeScalingV(
     const geometry::optimization::GraphOfConvexSets::Edge& e) const {
-  DRAKE_DEMAND(e.xv().size() == num_positions() * (to_subgraph_order_ + 1) + 1);
+  DRAKE_DEMAND(e.xv().size() ==
+               num_positions() * (to_subgraph_.order() + 1) + 1);
   return e.xv()(e.xv().size() - 1);
 }
 
@@ -754,10 +1334,22 @@ Subgraph& GcsTrajectoryOptimization::AddRegions(
     }
   }
 
+  for (auto& [lb, ub, derivative_order] : global_nonlinear_derivative_bounds_) {
+    if (order >= derivative_order) {
+      subgraph->AddNonlinearDerivativeBounds(lb, ub, derivative_order);
+    }
+  }
+
   // Add global continuity constraints to the subgraph.
-  for (int continuity_order : global_continuity_constraints_) {
+  for (int continuity_order : global_path_continuity_constraints_) {
     if (order >= continuity_order) {
       subgraph->AddPathContinuityConstraints(continuity_order);
+    }
+  }
+
+  for (int continuity_order : global_continuity_constraints_) {
+    if (order >= continuity_order) {
+      subgraph->AddContinuityConstraints(continuity_order);
     }
   }
 
@@ -789,6 +1381,50 @@ Subgraph& GcsTrajectoryOptimization::AddRegions(const ConvexSets& regions,
                                                std::move(name), edge_offsets);
 }
 
+void GcsTrajectoryOptimization::RemoveSubgraph(const Subgraph& subgraph) {
+  // Check if the subgraph is in the list of subgraphs.
+  if (!std::any_of(subgraphs_.begin(), subgraphs_.end(),
+                   [&](const std::unique_ptr<Subgraph>& s) {
+                     return s.get() == &subgraph;
+                   })) {
+    throw std::runtime_error(fmt::format(
+        "Subgraph {} is not registered with `this`", subgraph.name()));
+  }
+
+  // Remove the underlying edges between subgraphs from the gcs problem.
+  for (const std::unique_ptr<EdgesBetweenSubgraphs>& subgraph_edge :
+       subgraph_edges_) {
+    if (&subgraph_edge->from_subgraph_ == &subgraph ||
+        &subgraph_edge->to_subgraph_ == &subgraph) {
+      for (Edge* edge : subgraph_edge->edges_) {
+        gcs_.RemoveEdge(edge);
+      }
+    }
+  }
+
+  // Remove the edges between subgraphs objects.
+  subgraph_edges_.erase(
+      std::remove_if(subgraph_edges_.begin(), subgraph_edges_.end(),
+                     [&](const std::unique_ptr<EdgesBetweenSubgraphs>& e) {
+                       return &e->from_subgraph_ == &subgraph ||
+                              &e->to_subgraph_ == &subgraph;
+                     }),
+      subgraph_edges_.end());
+
+  // Remove all vertices in the subgraph.
+  for (Vertex* v : subgraph.vertices_) {
+    // This will also remove all edges connected to the vertex.
+    gcs_.RemoveVertex(v);
+  }
+
+  // Remove the subgraph from the list of subgraphs.
+  subgraphs_.erase(std::remove_if(subgraphs_.begin(), subgraphs_.end(),
+                                  [&](const std::unique_ptr<Subgraph>& s) {
+                                    return s.get() == &subgraph;
+                                  }),
+                   subgraphs_.end());
+}
+
 EdgesBetweenSubgraphs& GcsTrajectoryOptimization::AddEdges(
     const Subgraph& from_subgraph, const Subgraph& to_subgraph,
     const ConvexSet* subspace) {
@@ -796,10 +1432,17 @@ EdgesBetweenSubgraphs& GcsTrajectoryOptimization::AddEdges(
       new EdgesBetweenSubgraphs(from_subgraph, to_subgraph, subspace, this);
 
   // Add global continuity constraints to the edges between subgraphs.
-  for (int continuity_order : global_continuity_constraints_) {
-    if (subgraph_edge->from_subgraph_order_ >= continuity_order &&
-        subgraph_edge->to_subgraph_order_ >= continuity_order) {
+  for (int continuity_order : global_path_continuity_constraints_) {
+    if (subgraph_edge->from_subgraph_.order() >= continuity_order &&
+        subgraph_edge->to_subgraph_.order() >= continuity_order) {
       subgraph_edge->AddPathContinuityConstraints(continuity_order);
+    }
+  }
+
+  for (int continuity_order : global_continuity_constraints_) {
+    if (subgraph_edge->from_subgraph_.order() >= continuity_order &&
+        subgraph_edge->to_subgraph_.order() >= continuity_order) {
+      subgraph_edge->AddContinuityConstraints(continuity_order);
     }
   }
 
@@ -845,6 +1488,20 @@ void GcsTrajectoryOptimization::AddVelocityBounds(
   global_velocity_bounds_.push_back({lb, ub});
 }
 
+void GcsTrajectoryOptimization::AddNonlinearDerivativeBounds(
+    const Eigen::Ref<const Eigen::VectorXd>& lb,
+    const Eigen::Ref<const Eigen::VectorXd>& ub, int derivative_order) {
+  DRAKE_THROW_UNLESS(lb.size() == num_positions());
+  DRAKE_THROW_UNLESS(ub.size() == num_positions());
+  // Add nonlinear derivative bounds to each subgraph.
+  for (std::unique_ptr<Subgraph>& subgraph : subgraphs_) {
+    if (subgraph->order() >= derivative_order) {
+      subgraph->AddNonlinearDerivativeBounds(lb, ub, derivative_order);
+    }
+  }
+  global_nonlinear_derivative_bounds_.push_back({lb, ub, derivative_order});
+}
+
 void GcsTrajectoryOptimization::AddPathContinuityConstraints(
     int continuity_order) {
   if (continuity_order == 0) {
@@ -863,9 +1520,35 @@ void GcsTrajectoryOptimization::AddPathContinuityConstraints(
   // Add continuity constraints to the edges between subgraphs.
   for (std::unique_ptr<EdgesBetweenSubgraphs>& subgraph_edge :
        subgraph_edges_) {
-    if (subgraph_edge->from_subgraph_order_ >= continuity_order &&
-        subgraph_edge->to_subgraph_order_ >= continuity_order) {
+    if (subgraph_edge->from_subgraph_.order() >= continuity_order &&
+        subgraph_edge->to_subgraph_.order() >= continuity_order) {
       subgraph_edge->AddPathContinuityConstraints(continuity_order);
+    }
+  }
+
+  global_path_continuity_constraints_.push_back(continuity_order);
+}
+
+void GcsTrajectoryOptimization::AddContinuityConstraints(int continuity_order) {
+  if (continuity_order == 0) {
+    throw std::runtime_error(
+        "Path continuity is enforced by default. Choose a higher order.");
+  }
+  if (continuity_order < 1) {
+    throw std::runtime_error("Order must be greater than or equal to 1.");
+  }
+  // Add continuity constraints to each subgraph.
+  for (std::unique_ptr<Subgraph>& subgraph : subgraphs_) {
+    if (subgraph->order() >= continuity_order) {
+      subgraph->AddContinuityConstraints(continuity_order);
+    }
+  }
+  // Add continuity constraints to the edges between subgraphs.
+  for (std::unique_ptr<EdgesBetweenSubgraphs>& subgraph_edge :
+       subgraph_edges_) {
+    if (subgraph_edge->from_subgraph_.order() >= continuity_order &&
+        subgraph_edge->to_subgraph_.order() >= continuity_order) {
+      subgraph_edge->AddContinuityConstraints(continuity_order);
     }
   }
 
@@ -1076,6 +1759,25 @@ double GcsTrajectoryOptimization::EstimateComplexity() const {
   return result;
 }
 
+std::vector<Subgraph*> GcsTrajectoryOptimization::GetSubgraphs() const {
+  std::vector<Subgraph*> subgraphs;
+  subgraphs.reserve(subgraphs_.size());
+  for (const auto& subgraph : subgraphs_) {
+    subgraphs.push_back(subgraph.get());
+  }
+  return subgraphs;
+}
+
+std::vector<EdgesBetweenSubgraphs*>
+GcsTrajectoryOptimization::GetEdgesBetweenSubgraphs() const {
+  std::vector<EdgesBetweenSubgraphs*> subgraph_edges;
+  subgraph_edges.reserve(subgraph_edges_.size());
+  for (const auto& edge : subgraph_edges_) {
+    subgraph_edges.push_back(edge.get());
+  }
+  return subgraph_edges;
+}
+
 trajectories::CompositeTrajectory<double>
 GcsTrajectoryOptimization::NormalizeSegmentTimes(
     const trajectories::CompositeTrajectory<double>& trajectory) {
@@ -1093,18 +1795,112 @@ GcsTrajectoryOptimization::NormalizeSegmentTimes(
       start_time += 1.0;
     } else {
       throw std::runtime_error(
-          "All segments in the gcs trajectory must be of type "
+          "NormalizeSegmentTimes: All segments in the gcs trajectory "
+          "must be of type "
           "BezierCurve<double>.");
     }
   }
   return CompositeTrajectory<double>(normalized_bezier_curves);
 }
 
+namespace {
+bool IsMultipleOf2Pi(double value) {
+  // We allow some tolerance for trajectories coming out of GCS.
+  // TODO(sadra): find out what tolerance is appropriate.
+  double kTol = 1e-10;  // To match what is provided in the docs.
+  return std::abs(value - 2 * M_PI * std::round(value / (2 * M_PI))) < kTol;
+}
+
+// Unwrap the angle to the range [2π * round, 2π * (round+1)).
+double UnwrapAngle(const double angle, const int round) {
+  const int twopi_factors_to_remove =
+      static_cast<int>(std::floor(angle / (2 * M_PI))) - round;
+  return angle - 2 * M_PI * twopi_factors_to_remove;
+}
+}  // namespace
+
+trajectories::CompositeTrajectory<double>
+GcsTrajectoryOptimization::UnwrapToContinousTrajectory(
+    const trajectories::CompositeTrajectory<double>& gcs_trajectory,
+    std::vector<int> continuous_revolute_joints,
+    std::optional<std::vector<int>> starting_rounds) {
+  if (starting_rounds.has_value()) {
+    DRAKE_THROW_UNLESS(starting_rounds->size() ==
+                       continuous_revolute_joints.size());
+  }
+  // TODO(@anyone): make this a unique_ptr and use std::move to avoid copying.
+  std::vector<copyable_unique_ptr<Trajectory<double>>> unwrapped_trajectories;
+  int dim = gcs_trajectory.rows();
+  geometry::optimization::internal::ThrowsForInvalidContinuousJointsList(
+      dim, continuous_revolute_joints);
+  Eigen::VectorXd last_segment_finish;
+  for (int i = 0; i < gcs_trajectory.get_number_of_segments(); ++i) {
+    const auto& traj_segment = gcs_trajectory.segment(i);
+    const auto* bezier_segment =
+        dynamic_cast<const BezierCurve<double>*>(&traj_segment);
+    if (bezier_segment == nullptr) {
+      throw std::runtime_error(
+          "UnwrapToContinuousTrajectory: All segments in the gcs_trajectory "
+          "must be of type "
+          "BezierCurve<double>.");
+    }
+    Eigen::MatrixXd new_control_points = bezier_segment->control_points();
+    const Eigen::MatrixXd& old_control_points =
+        bezier_segment->control_points();
+    const Eigen::VectorXd& old_start = old_control_points.col(0);
+    std::vector<double> shift;
+    if (i == 0) {
+      // there is no shift from previous segment.
+      if (starting_rounds.has_value()) {
+        for (int j = 0; j < ssize(continuous_revolute_joints); ++j) {
+          const int joint_index = continuous_revolute_joints.at(j);
+          const int start_round = starting_rounds->at(j);
+          // This value will be subtracted from the old_start to get the
+          // shift.
+          const double joint_shift =
+              old_start(joint_index) -
+              UnwrapAngle(old_start(joint_index), start_round);
+          DRAKE_DEMAND(IsMultipleOf2Pi(joint_shift));
+          shift.push_back(joint_shift);
+        }
+      } else {
+        shift = std::vector<double>(ssize(continuous_revolute_joints), 0);
+      }
+    } else {
+      DRAKE_DEMAND(last_segment_finish.rows() == gcs_trajectory.rows());
+      // See how much shift is needed to match the previous new segment.
+      for (const int joint_index : continuous_revolute_joints) {
+        const double joint_shift =
+            old_start(joint_index) - last_segment_finish(joint_index);
+        if (!IsMultipleOf2Pi(joint_shift)) {
+          throw std::runtime_error(
+              fmt::format("UnwrapToContinuousTrajectory: The shift from "
+                          "previous segment: {} is not a multiple "
+                          "of 2π at segment {}, joint {}.",
+                          joint_shift, i, joint_index));
+        }
+        shift.push_back(joint_shift);
+      }
+    }
+    for (int j = 0; j < ssize(continuous_revolute_joints); ++j) {
+      const int joint_index = continuous_revolute_joints[j];
+      // Shift all the columns of the control points by the shift.
+      new_control_points.row(joint_index) -=
+          Eigen::VectorXd::Constant(old_control_points.cols(), shift.at(j));
+    }
+    last_segment_finish = new_control_points.rightCols(1);
+    unwrapped_trajectories.emplace_back(std::make_unique<BezierCurve<double>>(
+        bezier_segment->start_time(), bezier_segment->end_time(),
+        new_control_points));
+  }
+  return CompositeTrajectory<double>(unwrapped_trajectories);
+}
+
 std::vector<int> GetContinuousRevoluteJointIndices(
     const multibody::MultibodyPlant<double>& plant) {
   std::vector<int> indices;
-  for (int i = 0; i < plant.num_joints(); ++i) {
-    const Joint<double>& joint = plant.get_joint(JointIndex(i));
+  for (JointIndex i : plant.GetJointIndices()) {
+    const Joint<double>& joint = plant.get_joint(i);
     // The first possibility we check for is a revolute joint with no joint
     // limits.
     if (joint.type_name() == "revolute") {
@@ -1116,9 +1912,9 @@ std::vector<int> GetContinuousRevoluteJointIndices(
       }
       continue;
     }
-    // The second possibility we check for is a planar joint. If it is (and the
-    // angle component has no joint limits), we only add the third entry of the
-    // position vector, corresponding to theta.
+    // The second possibility we check for is a planar joint. If it is (and
+    // the angle component has no joint limits), we only add the third entry
+    // of the position vector, corresponding to theta.
     if (joint.type_name() == "planar") {
       if (joint.position_lower_limits()[2] ==
               -std::numeric_limits<float>::infinity() &&
@@ -1128,8 +1924,8 @@ std::vector<int> GetContinuousRevoluteJointIndices(
       }
       continue;
     }
-    // TODO(cohnt): Determine if other joint types (e.g. UniversalJoint) can be
-    // handled appropriately with wraparound edges, and if so, return their
+    // TODO(cohnt): Determine if other joint types (e.g. UniversalJoint) can
+    // be handled appropriately with wraparound edges, and if so, return their
     // indices as well.
   }
   return indices;

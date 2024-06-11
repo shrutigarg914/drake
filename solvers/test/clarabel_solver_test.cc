@@ -6,6 +6,7 @@
 #include "drake/common/test_utilities/expect_throws_message.h"
 #include "drake/solvers/mathematical_program.h"
 #include "drake/solvers/test/exponential_cone_program_examples.h"
+#include "drake/solvers/test/l2norm_cost_examples.h"
 #include "drake/solvers/test/linear_program_examples.h"
 #include "drake/solvers/test/mathematical_program_test_util.h"
 #include "drake/solvers/test/quadratic_program_examples.h"
@@ -326,6 +327,24 @@ GTEST_TEST(TestSOCP, TestSocpDuplicatedVariable2) {
   TestSocpDuplicatedVariable2(solver, std::nullopt, 1E-6);
 }
 
+GTEST_TEST(TestL2NormCost, ShortestDistanceToThreePoints) {
+  ClarabelSolver solver;
+  ShortestDistanceToThreePoints tester{};
+  tester.CheckSolution(solver);
+}
+
+GTEST_TEST(TestL2NormCost, ShortestDistanceFromCylinderToPoint) {
+  ClarabelSolver solver;
+  ShortestDistanceFromCylinderToPoint tester{};
+  tester.CheckSolution(solver);
+}
+
+GTEST_TEST(TestL2NormCost, ShortestDistanceFromPlaneToTwoPoints) {
+  ClarabelSolver solver;
+  ShortestDistanceFromPlaneToTwoPoints tester{};
+  tester.CheckSolution(solver, std::nullopt, 5E-4);
+}
+
 GTEST_TEST(TestExponentialConeProgram, ExponentialConeTrivialExample) {
   ClarabelSolver solver;
   if (solver.available()) {
@@ -427,6 +446,33 @@ GTEST_TEST(TestOptions, unrecognized) {
         ".*unrecognized solver options bad_unrecognized.*");
   }
 }
+
+GTEST_TEST(TestZeroStepSize, ZeroStepSize) {
+  // This is a program configuration that causes Clarabel to crash (and hence
+  // crash Drake) in version 0.6.0. In version 0.7.1, this configuration causes
+  // the solver to report InsufficientProgress.
+  ClarabelSolver solver;
+  MathematicalProgram prog;
+  const auto y = prog.NewContinuousVariables<2>("y");
+  MatrixX<symbolic::Expression> mat(2, 2);
+  mat << y(0, 0), 0.5, 0.5, y(1);
+  prog.AddPositiveSemidefiniteConstraint(mat);
+  prog.AddLogDeterminantLowerBoundConstraint(mat, 1);
+  prog.AddLinearCost(-y(0));
+  SolverOptions options;
+  options.SetOption(solver.id(), "max_step_fraction", 1e-10);
+  options.SetOption(CommonSolverOption::kPrintToConsole, true);
+  if (solver.available()) {
+    auto result = solver.Solve(prog, std::nullopt, options);
+    // The program has cost unbounded above and so the dual is infeasible, but
+    // the step size fraction forces the solver to make insufficient progress.
+    EXPECT_EQ(result.get_solution_result(),
+              SolutionResult::kSolverSpecificError);
+    EXPECT_EQ(result.get_solver_details<ClarabelSolver>().status,
+              "InsufficientProgress");
+  }
+}
+
 }  // namespace test
 }  // namespace solvers
 }  // namespace drake

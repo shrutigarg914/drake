@@ -135,8 +135,8 @@ enum class ContactModel {
   /// unsupported geometries will cause a runtime exception.
   kHydroelastic,
 
-  /// Contact forces are computed using a point contact model, see @ref
-  /// point_contact_approximation "Numerical Approximation of Point Contact".
+  /// Contact forces are computed using a point contact model,
+  /// see @ref compliant_point_contact.
   kPoint,
 
   /// Contact forces are computed using the hydroelastic model, where possible.
@@ -279,6 +279,7 @@ output_ports:
   model_instance_name[i]</em>_generalized_contact_forces'
 - <em style="color:gray">model_instance_name[i]</em>_net_actuation
 - <span style="color:green">geometry_pose</span>
+- <span style="color:green">deformable_body_configuration</span>
 @endsystem
 
 The ports whose names begin with <em style="color:gray">
@@ -402,11 +403,13 @@ the per model-instance ports (
 @ref get_actuation_input_port(ModelInstanceIndex)const
 "get_actuation_input_port(ModelInstanceIndex)") are summed up.
 
-@note The vector data supplied to %MultibodyPlant's actuation input ports should
-be ordered by @ref JointActuatorIndex. For the get_actuation_input_port() that
-covers all actuators, the iᵗʰ vector element corresponds to
-`JointActuatorIndex(i)`. For the
-@ref get_actuation_input_port(ModelInstanceIndex)const
+@note A JointActuator's index into the vector data supplied to %MultibodyPlant's
+actuation input port for all actuators (get_actuation_input_port()) is given by
+JointActuator::input_start(), NOT by its JointActuatorIndex. That is, the vector
+element data for a JointActuator at index JointActuatorIndex(i) in the full
+input port vector is found at index:
+  MultibodyPlant::get_joint_actuator(JointActuatorIndex(i)).input_start().
+For the @ref get_actuation_input_port(ModelInstanceIndex)const
 "get_actuation_input_port(ModelInstanceIndex)" specific to a model index, the
 vector data is ordered by monotonically increasing @ref JointActuatorIndex for
 the actuators within that model instance: the 0ᵗʰ vector element
@@ -529,10 +532,9 @@ files.  Consider the example below which loads an acrobot model:
   MultibodyPlant<T> acrobot;
   SceneGraph<T> scene_graph;
   Parser parser(&acrobot, &scene_graph);
-  const std::string relative_name =
-    "drake/multibody/benchmarks/acrobot/acrobot.sdf";
-  const std::string full_name = FindResourceOrThrow(relative_name);
-  parser.AddModels(full_name);
+  const std::string url =
+      "package://drake/multibody/benchmarks/acrobot/acrobot.sdf";
+  parser.AddModelsFromUrl(url);
 @endcode
 As in the example above, for models including visual geometry, collision
 geometry or both, the user must specify a SceneGraph for geometry handling.
@@ -571,7 +573,7 @@ Assign to auto, and use the named public fields:
   items.plant.DoFoo(...);
   items.scene_graph.DoBar(...);
 @endcode
-or taking advantage of C++17's structured binding
+or taking advantage of C++'s structured binding:
 @code
   auto [plant, scene_graph] = AddMultibodyPlantSceneGraph(&builder, 0.0);
   ...
@@ -653,7 +655,7 @@ the following properties for point contact modeling:
 
 ² If the property is missing, %MultibodyPlant will use
   a heuristic value as the default. Refer to the
-  section @ref mbp_compliant_point_contact "Compliant point contact model" for
+  section @ref point_contact_defaults "Point Contact Default Parameters" for
   further details.
 
 ³ When using a linear Kelvin–Voigt model of dissipation (for instance when
@@ -849,7 +851,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// Actuation values can be provided through a single input port which
   /// describes the entire plant, or through multiple input ports which each
   /// provide the actuation values for a specific model instance. See
-  /// AddJointActuator() and num_actuators().
+  /// AddJointActuator() and num_actuated_dofs().
   ///
   /// Output ports provide information about the entire %MultibodyPlant
   /// or its individual model instances.
@@ -905,10 +907,10 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
       const;
 
   /// Returns a constant reference to the input port for external actuation for
-  /// all actuated dofs. This input port is a vector valued port indexed by
-  /// @ref JointActuatorIndex, see JointActuator::index(), and can be set with
-  /// JointActuator::set_actuation_vector().
-  /// Refer to @ref mbp_actuation "Actuation" for further details.
+  /// all actuated dofs. This input port is a vector valued port and can be set
+  /// with JointActuator::set_actuation_vector(). The actuation value for a
+  /// particular actuator can be found at offset JointActuator::input_start() in
+  /// this vector. Refer to @ref mbp_actuation "Actuation" for further details.
   /// @pre Finalize() was already called on `this` plant.
   /// @throws std::exception if called before Finalize().
   const systems::InputPort<T>& get_actuation_input_port() const;
@@ -932,10 +934,10 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
 
   /// Returns a constant reference to the output port that reports actuation
   /// values applied through joint actuators. This output port is a vector
-  /// valued port indexed by @ref JointActuatorIndex, see
-  /// JointActuator::index(). Models that include PD controllers will include
-  /// their contribution in this port, refer to @ref mbp_actuation "Actuation"
-  /// for further details.
+  /// valued port. The actuation value for a particular actuator can be found at
+  /// offset JointActuator::input_start() in this vector. Models that include PD
+  /// controllers will include their contribution in this port, refer to @ref
+  /// mbp_actuation "Actuation" for further details.
   /// @note PD controllers are not considered for actuators on locked joints,
   /// see Joint::Lock(). Therefore they do not contribute to this port.
   /// @pre Finalize() was already called on `this` plant.
@@ -973,8 +975,13 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// sized. This port must provide one desired position and one desired
   /// velocity per joint actuator. Desired state is assumed to be packed as xd =
   /// [qd, vd] that is, configurations first followed by velocities.
-  /// Configurations in qd are ordered by JointActuatorIndex, see
-  /// JointActuator::set_actuation_vector(). Similarly for velocities in vd.
+  /// The actuation value for a particular actuator can be found at offset
+  /// JointActuator::input_start() in both qd and vd. For example:
+  /// ```
+  /// const double qd_actuator = xd[actuator.input_start()];
+  /// const double vd_actuator =
+  ///    xd[actuator.input_start() + plant.num_actuated_dofs()];
+  /// ```
   ///
   /// @warning If a user specifies a PD controller for an actuator from a given
   /// model instance, then all actuators of that model instance are required to
@@ -1075,6 +1082,16 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// Returns the output port of frames' poses to communicate with a
   /// SceneGraph.
   const systems::OutputPort<T>& get_geometry_poses_output_port() const;
+
+  // TODO(xuchenhan-tri): Remove the throw condition once DeformableModel is
+  //  added by default as part of #21355.
+  /// Returns the output port for vertex positions (configurations), measured
+  /// and expressed in the World frame, of the deformable bodies in `this` plant
+  /// as a GeometryConfigurationVector.
+  /// @throws std::exception if `this` %MultibodyPlant doesn't have a
+  /// DeformableModel. See AddPhysicalModel().
+  const systems::OutputPort<T>& get_deformable_body_configuration_output_port()
+      const;
   /// @} <!-- Input and output ports -->
 
   /// @anchor mbp_construction
@@ -1101,8 +1118,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// robustness and speed in problems with frictional contact. However this
   /// might change as we work towards developing better strategies to model
   /// contact.
-  /// See @ref time_advancement_strategy
-  /// "Choice of Time Advancement Strategy" for further details.
+  /// See @ref multibody_simulation for further details.
   ///
   /// @warning Users should be aware of current limitations in either modeling
   /// modality. While the discrete model is often the preferred option for
@@ -1121,8 +1137,8 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @param[in] time_step
   ///   Indicates whether `this` plant is modeled as a continuous system
   ///   (`time_step = 0`) or as a discrete system with periodic updates of
-  ///   period `time_step > 0`. See @ref time_advancement_strategy
-  ///   "Choice of Time Advancement Strategy" for further details.
+  ///   period `time_step > 0`. See @ref multibody_simulation for further
+  ///   details.
   ///
   /// @warning Currently the continuous modality with `time_step = 0` does not
   /// support joint limits for simulation, these are ignored. %MultibodyPlant
@@ -1159,12 +1175,12 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @param[in] M_BBo_B
   ///   The SpatialInertia of the new rigid body to be added to `this`
   ///   %MultibodyPlant, computed about the body frame origin `Bo` and expressed
-  ///   in the body frame B.
+  ///   in the body frame B. When not provided, defaults to zero.
   /// @returns A constant reference to the new RigidBody just added, which will
   ///          remain valid for the lifetime of `this` %MultibodyPlant.
-  const RigidBody<T>& AddRigidBody(const std::string& name,
-                                   ModelInstanceIndex model_instance,
-                                   const SpatialInertia<double>& M_BBo_B) {
+  const RigidBody<T>& AddRigidBody(
+      const std::string& name, ModelInstanceIndex model_instance,
+      const SpatialInertia<double>& M_BBo_B = SpatialInertia<double>::Zero()) {
     DRAKE_MBP_THROW_IF_FINALIZED();
     // Add the actual rigid body to the model.
     const RigidBody<T>& body =
@@ -1204,13 +1220,14 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @param[in] M_BBo_B
   ///   The SpatialInertia of the new rigid body to be added to `this`
   ///   %MultibodyPlant, computed about the body frame origin `Bo` and expressed
-  ///   in the body frame B.
+  ///   in the body frame B. When not provided, defaults to zero.
   /// @returns A constant reference to the new RigidBody just added, which will
   ///          remain valid for the lifetime of `this` %MultibodyPlant.
   /// @throws std::exception if additional model instances have been created
   ///                        beyond the world and default instances.
-  const RigidBody<T>& AddRigidBody(const std::string& name,
-                                   const SpatialInertia<double>& M_BBo_B) {
+  const RigidBody<T>& AddRigidBody(
+      const std::string& name,
+      const SpatialInertia<double>& M_BBo_B = SpatialInertia<double>::Zero()) {
     if (num_model_instances() != 2) {
       throw std::logic_error(
           "This model has more model instances than the default.  Please "
@@ -1342,6 +1359,37 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   }
   // clang-format on
 
+  /// Removes and deletes `joint` from this %MultibodyPlant. Any existing
+  /// references to `joint` will become invalid, and future calls to
+  /// `get_joint(joint_index)` will throw an exception. Other elements
+  /// of the plant may depend on `joint` at the time of removal and should
+  /// be removed first. For example, a JointActuator that depends on `joint`
+  /// should be removed with RemoveJointActuator(). Currently, we do not
+  /// provide joint dependency tracking for force elements or constraints,
+  /// so this function will throw an exception if there are *any* user-added
+  /// force elements or constraints in the plant.
+  ///
+  /// @throws std::exception if the plant is already finalized.
+  /// @throws std::exception if the plant contains a non-zero number of
+  /// user-added force elements or user-added constraints.
+  /// @throws std::exception if `joint` has a dependent JointActuator.
+  /// @see AddJoint()
+  /// @note It is important to note that the JointIndex assigned to a joint is
+  /// immutable. New joint indices are assigned in increasing order, even if a
+  /// joint with a lower index has been removed. This has the consequence that
+  /// when a joint is removed from the plant, the sequence `[0, num_joints())`
+  /// is not necessarily the correct set of un-removed joint indices in the
+  /// plant. Thus, it is important *NOT* to loop over joint indices sequentially
+  /// from `0` to `num_joints() - 1`. Instead users should use the provided
+  /// GetJointIndices() and GetJointIndices(ModelIndex) functions:
+  /// ```
+  /// for (JointIndex index : plant.GetJointIndices()) {
+  ///   const Joint<double>& joint = plant.get_joint(index);
+  ///   ...
+  ///  }
+  /// ```
+  void RemoveJoint(const Joint<T>& joint);
+
   /// Welds `frame_on_parent_F` and `frame_on_child_M` with relative pose
   /// `X_FM`. That is, the pose of frame M in frame F is fixed, with value
   /// `X_FM`.  If `X_FM` is omitted, the identity transform will be used. The
@@ -1405,12 +1453,22 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// via this actuator, the user-level code (e.g., a controller) should query
   /// this effort limit and impose the saturation there.
   /// @returns A constant reference to the new JointActuator just added, which
-  /// will remain valid for the lifetime of `this` plant.
+  /// will remain valid for the lifetime of `this` plant or until the
+  /// JointActuator has been removed from the plant with RemoveJointActuator().
   /// @throws std::exception if `joint.num_velocities() > 1` since for now we
   /// only support actuators for single dof joints.
+  /// @see RemoveJointActuator()
   const JointActuator<T>& AddJointActuator(
       const std::string& name, const Joint<T>& joint,
       double effort_limit = std::numeric_limits<double>::infinity());
+
+  /// Removes and deletes `actuator` from this %MultibodyPlant. Any existing
+  /// references to `actuator` will become invalid, and future calls to
+  /// `get_joint_actuator(actuator_index)` will throw an exception.
+  ///
+  /// @throws std::exception if the plant is already finalized.
+  /// @see AddJointActuator()
+  void RemoveJointActuator(const JointActuator<T>& actuator);
 
   /// Creates a new model instance.  Returns the index for the model
   /// instance.
@@ -1518,7 +1576,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @throws if `id` is not a valid identifier for a coupler constraint.
   const internal::CouplerConstraintSpec& get_coupler_constraint_specs(
       MultibodyConstraintId id) const {
-    DRAKE_THROW_UNLESS(coupler_constraints_specs_.count(id) > 0);
+    DRAKE_THROW_UNLESS(coupler_constraints_specs_.contains(id));
     return coupler_constraints_specs_.at(id);
   }
 
@@ -1527,7 +1585,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @throws if `id` is not a valid identifier for a distance constraint.
   const internal::DistanceConstraintSpec& get_distance_constraint_specs(
       MultibodyConstraintId id) const {
-    DRAKE_THROW_UNLESS(distance_constraints_specs_.count(id) > 0);
+    DRAKE_THROW_UNLESS(distance_constraints_specs_.contains(id));
     return distance_constraints_specs_.at(id);
   }
 
@@ -1536,7 +1594,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @throws if `id` is not a valid identifier for a ball constraint.
   const internal::BallConstraintSpec& get_ball_constraint_specs(
       MultibodyConstraintId id) const {
-    DRAKE_THROW_UNLESS(ball_constraints_specs_.count(id) > 0);
+    DRAKE_THROW_UNLESS(ball_constraints_specs_.contains(id));
     return ball_constraints_specs_.at(id);
   }
 
@@ -1545,7 +1603,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @throws if `id` is not a valid identifier for a weld constraint.
   const internal::WeldConstraintSpec& get_weld_constraint_specs(
       MultibodyConstraintId id) const {
-    DRAKE_THROW_UNLESS(weld_constraints_specs_.count(id) > 0);
+    DRAKE_THROW_UNLESS(weld_constraints_specs_.contains(id));
     return weld_constraints_specs_.at(id);
   }
 
@@ -1989,228 +2047,8 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// Use methods in this section to choose the contact model and to provide
   /// parameters for that model. Currently Drake supports an advanced compliant
   /// model of continuous surface patches we call _Hydroelastic contact_ and a
-  /// compliant point contact model as a reliable fallback.
-  ///
-  /// @anchor mbp_hydroelastic_materials_properties
-  ///                      #### Hydroelastic contact
-  ///
-  /// The purpose of this documentation is to provide a quick overview of our
-  /// contact models and their modeling parameters. More details are provided in
-  /// Drake's @ref hydroelastic_user_guide "Hydroelastic Contact User Guide" and
-  /// references therein.
-  ///
-  /// In a nutshell, each hydroelastic body defines a body centric pressure
-  /// field that increases towards the inside of the body. How quickly this
-  /// pressure field increases towards the inside is parameterized by a
-  /// “Hydroelastic modulus”, see @ref hug_hydro_theory "Hydroelastic Contact".
-  /// When two of these hydroelastic bodies come into contact (i.e. they
-  /// overlap), a contact patch is defined by the surface of equal hydroelastic
-  /// pressure within the volume of intersection. Forces and moments are then
-  /// computed by integrating these pressure contributions over the contact
-  /// surface.
-  ///
-  /// The Hydroelastic modulus has units of pressure, i.e. `Pa (N/m²)`. The
-  /// hydroelastic modulus is often estimated based on the Young's modulus of
-  /// the material though in the hydroelastic model it represents an effective
-  /// elastic property. For instance, [R. Elandt 2019] chooses to use `E = G`,
-  /// with `G` the P-wave elastic modulus `G = (1-ν)/(1+ν)/(1-2ν)E`, with ν the
-  /// Poisson ratio, consistent with the theory of layered solids in which plane
-  /// sections remain planar after compression. Another possibility is to
-  /// specify `E = E*`, with `E*` the effective elastic modulus given by the
-  /// Hertz theory of contact, `E* = E/(1-ν²)`. In all of these cases a sound
-  /// estimation of `hydroelastic_modulus` starts with the Young's modulus of
-  /// the material. However, due to numerical conditioning, much smaller values
-  /// are used in practice for hard materials such as steel. While Young's
-  /// modulus of steel is about 200 GPa (2×10¹¹ Pa), hydroelastic modulus values
-  /// of about 10⁵−10⁶ Pa lead to good approximations of rigid contact, with no
-  /// practical reason to use higher values.
-  ///
-  /// @note `hydroelastic_modulus` has units of stress/strain, measured in
-  /// Pascal or N/m² like the more-familiar elastic moduli discussed above.
-  /// However, it is quantitatively different and may require experimentation
-  /// to match empirical behavior.
-  ///
-  /// We use a Hunt & Crossley dissipation model parameterized by a dissipation
-  /// constant with units of inverse of velocity, i.e. `s/m`. See
-  /// @ref mbp_dissipation_model "Modeling Dissipation" for more detail.
-  /// For two hydroelastic bodies A and B, with hydroelastic moduli `Eᵃ` and
-  /// `Eᵇ` respectively and dissipation `dᵃ` and `dᵇ` respectively, an effective
-  /// dissipation is defined according to the combination law: <pre>
-  ///   E = Eᵃ⋅Eᵇ/(Eᵃ + Eᵇ),
-  ///   d = E/Eᵃ⋅dᵃ + E/Eᵇ⋅dᵇ = Eᵇ/(Eᵃ+Eᵇ)⋅dᵃ + Eᵃ/(Eᵃ+Eᵇ)⋅dᵇ
-  /// </pre>
-  /// thus dissipation is weighted in accordance with the fact that the softer
-  /// material will deform more and faster and thus the softer material
-  /// dissipation is given more importance.
-  ///
-  /// The dissipation can be specified in one of two ways:
-  ///
-  /// - define it in an instance of geometry::ProximityProperties using
-  ///   the function geometry::AddContactMaterial(), or
-  /// - define it in an input URDF/SDFormat file as detailed here:
-  ///   @ref tag_drake_hunt_crossley_dissipation.
-  ///
-  /// The hydroelastic modulus can be specified in one of two ways:
-  ///
-  /// - define it in an instance of geometry::ProximityProperties using
-  ///   the function geometry::AddCompliantHydroelasticProperties() and
-  ///   geometry::AddCompliantHydroelasticPropertiesForHalfSpace(), or
-  /// - define it in an input URDF/SDFormat file as detailed here:
-  ///   @ref tag_drake_hydroelastic_modulus.
-  ///
-  /// @anchor mbp_compliant_point_contact
-  ///                   #### Compliant point contact model
-  ///
-  /// We provide a brief discussion of this model here to introduce users to
-  /// model parameters and APIs. For a more detailed discussion, refer to
-  /// @ref hug_point_contact_theory "Compliant Point Contact".
-  ///
-  /// In a compliant point contact model, we allow for a certain amount of
-  /// interpenetration and we compute contact forces according to a simple law
-  /// of the form: <pre>
-  ///   fₙ = k(x)₊(1 + dẋ)₊
-  /// </pre>
-  /// with `(a)₊ = max(0, a)`. The normal contact force `fₙ` is made a
-  /// continuous function of the penetration distance x between the bodies
-  /// (defined to be positive when the bodies are in contact) and the
-  /// penetration distance rate ẋ (with ẋ > 0 meaning the penetration distance
-  /// is increasing and therefore the interpenetration between the bodies is
-  /// also increasing). Stiffness `k` and dissipation `d` are the combined
-  /// of stiffness and dissipation, given a pair of contacting geometries.
-  /// Dissipation is modeled using a Hunt & Crossley model of dissipation, see
-  /// @ref mbp_dissipation_model "Modeling Dissipation" for details.  For
-  /// flexibility of parameterization, stiffness and dissipation are set on a
-  /// per-geometry basis (@ref accessing_contact_properties). Given two
-  /// geometries with individual stiffness and dissipation parameters (k₁, d₁)
-  /// and (k₂, d₂), we define the rule for combined stiffness (k) and
-  /// dissipation (d) as: <pre>
-  ///     k = (k₁⋅k₂)/(k₁+k₂)
-  ///     d = (k₂/(k₁+k₂))⋅d₁ + (k₁/(k₁+k₂))⋅d₂
-  /// </pre>
-  /// These parameters are optional for each geometry. For any geometry not
-  /// assigned these parameters by a user Pre-Finalize, %MultibodyPlant will
-  /// assign default values such that the combined parameters of two geometries
-  /// with default values match those estimated using the user-supplied
-  /// "penetration allowance", as described below.
-  ///
-  /// @note When modeling stiff materials such as steel or ceramics, these model
-  /// parameters often need to be tuned as a trade-off between numerical
-  /// stiffness and physical accuracy. Stiffer materials lead to a harder to
-  /// solve system of equations, affecting the overall performance of the
-  /// simulation. The convex approximation provided in Drake are very robust
-  /// even at high stiffness values, please refer to [Castro et al., 2023] in
-  /// DiscreteContactApproximation for a study on the effect of stiffness on
-  /// solver performance.
-  ///
-  /// While we strongly recommend setting these parameters accordingly for your
-  /// model, %MultibodyPlant aids the estimation of these coefficients using a
-  /// heuristic function based on a user-supplied "penetration allowance", see
-  /// set_penetration_allowance(). This heuristics offers a good starting point
-  /// when setting a simulation for the first time. Users can then set material
-  /// properties for specific geometries once they observe the results of a
-  /// first simulation with these defaults. The penetration allowance is a
-  /// number in meters that specifies the order of magnitude of the average
-  /// penetration between bodies in the system that the user is willing to
-  /// accept as reasonable for the problem being solved. For instance, in the
-  /// robotics manipulation of ordinary daily objects the user might set this
-  /// number to 1 millimeter. However, the user might want to increase it for
-  /// the simulation of heavy walking robots for which an allowance of 1
-  /// millimeter would result in a very stiff system.
-  ///
-  /// As for the dissipation coefficient in the simple law above,
-  /// %MultibodyPlant chooses the dissipation coefficient d to model inelastic
-  /// collisions and therefore sets it so that the penetration distance x
-  /// behaves as a critically damped oscillator. That is, at the limit of ideal
-  /// rigid contact (very high stiffness k or equivalently the penetration
-  /// allowance goes to zero), this method behaves as a unilateral constraint on
-  /// the penetration distance, which models a perfect inelastic collision. For
-  /// most applications, such as manipulation and walking, this is the desired
-  /// behavior.
-  ///
-  /// When set_penetration_allowance() is called, %MultibodyPlant will estimate
-  /// reasonable stiffness and dissipation coefficients as a function of the
-  /// input penetration allowance. Users will want to run their simulation a
-  /// number of times and assess they are satisfied with the level of
-  /// inter-penetration actually observed in the simulation; if the observed
-  /// penetration is too large, the user will want to set a smaller penetration
-  /// allowance. If the system is too stiff and the time integration requires
-  /// very small time steps while at the same time the user can afford larger
-  /// inter-penetrations, the user will want to increase the penetration
-  /// allowance. Typically, the observed penetration will be
-  /// proportional to the penetration allowance. Thus scaling the penetration
-  /// allowance by say a factor of 0.5, would typically results in
-  /// inter-penetrations being reduced by the same factor of 0.5.
-  /// In summary, users should choose the largest penetration allowance that
-  /// results in inter-penetration levels that are acceptable for the particular
-  /// application (even when in theory this penetration should be zero for
-  /// perfectly rigid bodies.)
-  ///
-  /// For a given penetration allowance, the contact interaction that takes two
-  /// bodies with a non-zero approaching velocity to zero approaching velocity,
-  /// takes place in a finite amount of time (for ideal rigid contact this time
-  /// is zero.) A good estimate of this time period is given by a call to
-  /// get_contact_penalty_method_time_scale(). Users might want to query this
-  /// value to either set the maximum time step in error-controlled time
-  /// integration or to set the time step for fixed time step integration.
-  /// As a guidance, typical fixed time step integrators will become unstable
-  /// for time steps larger than about a tenth of this time scale.
-  ///
-  /// For further details on contact modeling in Drake, please refer to the
-  /// section @ref drake_contacts "Contact Modeling in Drake" of our
-  /// documentation.
-  ///
-  /// @anchor mbp_dissipation_model
-  ///                   #### Modeling Dissipation
-  ///
-  /// We use a dissipation model inspired by the model in
-  /// [Hunt and Crossley, 1975], parameterized by a dissipation constant with
-  /// units of inverse of velocity, i.e. `s/m`.
-  ///
-  /// To be more precise, compliant point contact forces are modeled as a
-  /// function of state x: <pre>
-  ///   f(x) = fₑ(x)⋅(1 - d⋅vₙ(x))₊
-  /// </pre>
-  /// where here `fₑ(x)` denotes the elastic forces, vₙ(x) is the contact
-  /// velocity in the normal direction (negative when objects approach) and
-  /// `(a)₊` denotes "the positive part of a". The model parameter `d ` is the
-  /// Hunt & Crossley dissipation constant, in s/m. The Hunt & Crossley term
-  /// `(1 - d⋅vₙ(x))₊` models the effect of dissipation due to deformation.
-  ///
-  /// Similarly, Drake's hydroelastic contact model incorporates dissipation at
-  /// the stress level, rather than forces. That is, pressure `p(x)` at a
-  /// specific point on the contact surface is replaces the force `f(x)` in the
-  /// point contact model: <pre>
-  ///   p(x) = pₑ(x)⋅(1 - d⋅vₙ(x))₊
-  /// </pre>
-  /// where `pₑ(x)` is the (elastic) hydroelastic pressure and once more the
-  /// term `(1 - d⋅vₙ(x))₊` models Hunt & Crossley dissipation.
-  ///
-  /// This is our prefered model of dissipation for several reasons:
-  /// 1. It is based on physics and has been developed based on experimental
-  ///    observations.
-  /// 2. It is a continous function of state, as in the real phyisical world.
-  ///    Moreover, this continuity leads to better conditioned systems of
-  ///    equations.
-  /// 3. The bounce velocity after an impact is bounded by 1/d, giving a quick
-  ///    physical intuition when setting this parameter.
-  /// 4. Typical values are in the range [0; 100] s/m, with a value of 20 s/m
-  ///    being typical.
-  /// 5. Values larger than 500 s/m are unphysical and usually lead to numerical
-  ///    problems when using discrete approximations given how time is
-  ///    discretized.
-  ///
-  /// The Hunt & Crossley model is supported by the
-  /// DiscreteContactApproximation::kTamsi,
-  /// DiscreteContactApproximation::kSimilar, and
-  /// DiscreteContactApproximation::kLagged model approximations. In particular,
-  /// DiscreteContactApproximation::kSimilar and
-  /// DiscreteContactApproximation::kLagged are convex approximations of
-  /// contact, using a solver with theoretical and practical convergence
-  /// guarantees.
-  ///
-  /// [Hunt and Crossley 1975] Hunt, KH and Crossley, FRE, 1975. Coefficient
-  ///   of restitution interpreted as damping in vibroimpact. Journal of Applied
-  ///   Mechanics, vol. 42, pp. 440–445.
+  /// compliant point contact model as a reliable fallback. Please refer to
+  /// @ref compliant_contact "Modeling Compliant Contact" for details.
   ///
   /// @{
 
@@ -2298,8 +2136,10 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// %MultibodyPlant. See geometry::HydroelasticContactRepresentation for
   /// available options. See GetDefaultContactSurfaceRepresentation() for
   /// explanation of default values.
+  /// @throws std::exception if called post-finalize.
   void set_contact_surface_representation(
       geometry::HydroelasticContactRepresentation representation) {
+    DRAKE_MBP_THROW_IF_FINALIZED();
     contact_surface_representation_ = representation;
   }
 
@@ -2375,7 +2215,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   // camel case per GSG.
   /// Sets the penetration allowance used to estimate the coefficients in the
   /// penalty method used to impose non-penetration among bodies. Refer to the
-  /// section @ref mbp_compliant_point_contact "Compliant point contact model"
+  /// section @ref point_contact_defaults "Point Contact Default Parameters"
   /// for further details.
   ///
   /// @throws std::exception if penetration_allowance is not positive.
@@ -2419,8 +2259,7 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// integration of ODE's, it often leads to stiff dynamics that require
   /// an explicit integrator to take very small time steps. It is therefore
   /// recommended to use error controlled integrators when using this model or
-  /// the discrete time stepping (see @ref time_advancement_strategy
-  /// "Choice of Time Advancement Strategy").
+  /// the discrete time stepping (see @ref multibody_simulation).
   /// See @ref stribeck_approximation for a detailed discussion of the Stribeck
   /// model.
   ///
@@ -2910,12 +2749,13 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// Returns a vector of actuation values for `model_instance` from a vector
   /// `u` of actuation values for the entire plant model. Refer to @ref
   /// mbp_actuation "Actuation" for further details.
-  /// @param[in] u Actuation values for the entire model, indexed by
-  /// @ref JointActuatorIndex.
+  /// @param[in] u Actuation values for the entire model. The actuation value
+  ///   in `u` for a particular actuator must be found at offset
+  ///   JointActuator::input_start().
   /// @returns Actuation values for `model_instance`, ordered by monotonically
-  /// increasing @ref JointActuatorIndex.
+  ///   increasing @ref JointActuatorIndex.
   /// @throws std::exception if `u` is not of size
-  /// MultibodyPlant::num_actuated_dofs().
+  ///   MultibodyPlant::num_actuated_dofs().
   VectorX<T> GetActuationFromArray(
       ModelInstanceIndex model_instance,
       const Eigen::Ref<const VectorX<T>>& u) const {
@@ -2929,9 +2769,10 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @param[in] u_instance Actuation values for the model instance. Values are
   ///   ordered by monotonically increasing @ref JointActuatorIndex within the
   ///   model instance.
-  /// @param[in,out] u Actuation values for the entire plant model, indexed by
-  ///   @ref JointActuatorIndex. Only values corresponding to `model_instance`
-  ///   are changed.
+  /// @param[in,out] u Actuation values for the entire plant model. The
+  ///   actuation value in `u` for a particular actuator must be found at offset
+  ///   JointActuator::input_start(). Only values corresponding to
+  ///   `model_instance` are changed.
   /// @throws std::exception if the size of `u_instance` is not equal to the
   ///   number of actuation inputs for the joints of `model_instance`.
   void SetActuationInArray(ModelInstanceIndex model_instance,
@@ -3139,16 +2980,23 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
                                                       state);
   }
 
-  // TODO(sherm1) Rename this SetFreeBodyRandomTranslationDistribution()
-
   /// Sets the distribution used by SetRandomState() to populate the free
-  /// body's x-y-z `position` with respect to World.
+  /// body's x-y-z `translation` with respect to World.
   /// @throws std::exception if `body` is not a free body in the model.
   /// @throws std::exception if called pre-finalize.
+  void SetFreeBodyRandomTranslationDistribution(
+      const RigidBody<T>& body,
+      const Vector3<symbolic::Expression>& translation) {
+    this->mutable_tree().SetFreeBodyRandomTranslationDistributionOrThrow(
+        body, translation);
+  }
+
+  DRAKE_DEPRECATED(
+      "2024-08-01",
+      "Use MultibodyPlant::SetFreeBodyRandomTranslationDistribution()")
   void SetFreeBodyRandomPositionDistribution(
       const RigidBody<T>& body, const Vector3<symbolic::Expression>& position) {
-    this->mutable_tree().SetFreeBodyRandomTranslationDistributionOrThrow(
-        body, position);
+    return SetFreeBodyRandomTranslationDistribution(body, position);
   }
 
   /// Sets the distribution used by SetRandomState() to populate the free
@@ -3306,39 +3154,39 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
     }
   }
 
-  /// Calculates the rigid transform (pose) `X_FG` relating frame F and frame G.
+  /// Calculates the rigid transform (pose) `X_AB` relating frame A and frame B.
   /// @param[in] context
   ///    The state of the multibody system, which includes the system's
-  ///    generalized positions q.  Note: `X_FG` is a function of q.
-  /// @param[in] frame_F
-  ///    The frame F designated in the rigid transform `X_FG`.
-  /// @param[in] frame_G
-  ///    The frame G designated in the rigid transform `X_FG`.
-  /// @retval X_FG
-  ///    The RigidTransform relating frame F and frame G.
+  ///    generalized positions q.  Note: `X_AB` is a function of q.
+  /// @param[in] frame_A
+  ///    The frame A designated in the rigid transform `X_AB`.
+  /// @param[in] frame_B
+  ///    The frame G designated in the rigid transform `X_AB`.
+  /// @retval X_AB
+  ///    The RigidTransform relating frame A and frame B.
   math::RigidTransform<T> CalcRelativeTransform(
-      const systems::Context<T>& context, const Frame<T>& frame_F,
-      const Frame<T>& frame_G) const {
+      const systems::Context<T>& context, const Frame<T>& frame_A,
+      const Frame<T>& frame_B) const {
     this->ValidateContext(context);
-    return internal_tree().CalcRelativeTransform(context, frame_F, frame_G);
+    return internal_tree().CalcRelativeTransform(context, frame_A, frame_B);
   }
 
-  /// Calculates the rotation matrix `R_FG` relating frame F and frame G.
+  /// Calculates the rotation matrix `R_AB` relating frame A and frame B.
   /// @param[in] context
   ///    The state of the multibody system, which includes the system's
-  ///    generalized positions q.  Note: `R_FG` is a function of q.
-  /// @param[in] frame_F
-  ///    The frame F designated in the rigid transform `R_FG`.
-  /// @param[in] frame_G
-  ///    The frame G designated in the rigid transform `R_FG`.
-  /// @retval R_FG
-  ///    The RigidTransform relating frame F and frame G.
+  ///    generalized positions q.  Note: `R_AB` is a function of q.
+  /// @param[in] frame_A
+  ///    The frame A designated in the rigid transform `R_AB`.
+  /// @param[in] frame_B
+  ///    The frame G designated in the rigid transform `R_AB`.
+  /// @retval R_AB
+  ///    The RigidTransform relating frame A and frame B.
   math::RotationMatrix<T> CalcRelativeRotationMatrix(
-      const systems::Context<T>& context, const Frame<T>& frame_F,
-      const Frame<T>& frame_G) const {
+      const systems::Context<T>& context, const Frame<T>& frame_A,
+      const Frame<T>& frame_B) const {
     this->ValidateContext(context);
-    return internal_tree().CalcRelativeRotationMatrix(context, frame_F,
-                                                      frame_G);
+    return internal_tree().CalcRelativeRotationMatrix(context, frame_A,
+                                                      frame_B);
   }
 
   /// Given the positions `p_BQi` for a set of points `Qi` measured and
@@ -4376,8 +4224,9 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// A user specifies the preferred order in uₛ via
   /// `user_to_actuator_index_map`. The actuation values in uₛ are a
   /// concatenation of the values for each actuator in the order they appear in
-  /// `user_to_actuator_index_map`.
-  /// The full vector of actuation values u is ordered by JointActuatorIndex.
+  /// `user_to_actuator_index_map`. The actuation value in the full vector of
+  /// actuation values `u` for a particular actuator can be found at offset
+  /// JointActuator::input_start().
   MatrixX<double> MakeActuatorSelectorMatrix(
       const std::vector<JointActuatorIndex>& user_to_actuator_index_map) const {
     return internal_tree().MakeActuatorSelectorMatrix(
@@ -4386,12 +4235,12 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
 
   /// This method creates an actuation matrix B mapping a vector of actuation
   /// values u into generalized forces `tau_u = B * u`, where B is a matrix of
-  /// size `nv x nu` with `nu` equal to num_actuators() and `nv` equal to
+  /// size `nv x nu` with `nu` equal to num_actuated_dofs() and `nv` equal to
   /// num_velocities().
-  /// The vector u of actuation values is of size num_actuators(). For a given
-  /// JointActuator, `u[JointActuator::index()]` stores the value for the
-  /// external actuation corresponding to that actuator. `tau_u` on the other
-  /// hand is indexed by generalized velocity indexes according to
+  /// The vector u of actuation values is of size num_actuated_dofs(). For a
+  /// given JointActuator, `u[JointActuator::input_start()]` stores the value
+  /// for the external actuation corresponding to that actuator. `tau_u` on the
+  /// other hand is indexed by generalized velocity indexes according to
   /// `Joint::velocity_start()`.
   /// @warning B is a permutation matrix. While making a permutation has
   /// `O(n)` complexity, making a full B matrix has `O(n²)` complexity. For most
@@ -4408,11 +4257,11 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
 
   /// Alternative signature to build an actuation selector matrix `Su` such
   /// that `u = Su⋅uₛ`, where u is the vector of actuation values for the full
-  /// model (ordered by JointActuatorIndex) and uₛ is a vector of actuation
+  /// model (see get_actuation_input_port()) and uₛ is a vector of actuation
   /// values for the actuators acting on the joints listed by
   /// `user_to_joint_index_map`. It is assumed that all joints referenced by
-  /// `user_to_joint_index_map` are actuated.
-  /// See MakeActuatorSelectorMatrix(const std::vector<JointActuatorIndex>&) for
+  /// `user_to_joint_index_map` are actuated. See
+  /// MakeActuatorSelectorMatrix(const std::vector<JointActuatorIndex>&) for
   /// details.
   /// @throws std::exception if any of the joints in
   /// `user_to_joint_index_map` does not have an actuator.
@@ -4607,6 +4456,12 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @see AddJoint().
   int num_joints() const { return internal_tree().num_joints(); }
 
+  /// Returns true if plant has a joint with unique index `joint_index`. The
+  /// value could be false if the joint was removed using RemoveJoint().
+  bool has_joint(JointIndex joint_index) const {
+    return internal_tree().has_joint(joint_index);
+  }
+
   /// Returns a constant reference to the joint with unique index `joint_index`.
   /// @throws std::exception when `joint_index` does not correspond to a
   /// joint in this model.
@@ -4637,10 +4492,24 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
     return this->mutable_tree().get_mutable_joint(joint_index);
   }
 
+  /// Returns a list of all joint indices. The vector is ordered by
+  /// monotonically increasing @ref JointIndex, but the indexes will in
+  /// general not be consecutive due to joints that were removed.
+  const std::vector<JointIndex>& GetJointIndices() const {
+    return internal_tree().GetJointIndices();
+  }
+
   /// Returns a list of joint indices associated with `model_instance`.
   std::vector<JointIndex> GetJointIndices(
       ModelInstanceIndex model_instance) const {
     return internal_tree().GetJointIndices(model_instance);
+  }
+
+  /// Returns a list of all joint actuator indices. The vector is ordered by
+  /// monotonically increasing @ref JointActuatorIndex, but the indexes will in
+  /// general not be consecutive due to actuators that were removed.
+  const std::vector<JointActuatorIndex>& GetJointActuatorIndices() const {
+    return internal_tree().GetJointActuatorIndices();
   }
 
   /// Returns a list of joint actuator indices associated with `model_instance`.
@@ -4766,6 +4635,13 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   /// @throws std::exception if called pre-finalize.
   int num_actuated_dofs(ModelInstanceIndex model_instance) const {
     return internal_tree().num_actuated_dofs(model_instance);
+  }
+
+  /// Returns true if plant has a joint actuator with unique index
+  /// `actuator_index`. The value could be false if the actuator was removed
+  /// using RemoveJointActuator().
+  bool has_joint_actuator(JointActuatorIndex actuator_index) const {
+    return internal_tree().has_joint_actuator(actuator_index);
   }
 
   /// Returns a constant reference to the joint actuator with unique index
@@ -5251,22 +5127,29 @@ class MultibodyPlant : public internal::MultibodyTreeSystem<T> {
   void EstimatePointContactParameters(double penetration_allowance);
 
   // Helper method to assemble actuation input vector from the appropriate
-  // ports. The return value is indexed by JointActuatorIndex.
+  // ports. The actuation value for a particular actuator can be found at offset
+  // JointActuator::input_start() in the returned vector (see
+  // MultibodyPlant::get_actuation_input_port()).
   VectorX<T> AssembleActuationInput(const systems::Context<T>& context) const;
 
   // Computes the net applied actuation through actuators. For continuous
   // models (thus far) this only inludes values coming from the
   // actuation_input_port. For discrete models, it includes actuator
   // controllers, see @ref mbp_actuation. Similarly to AssembleActuationInput(),
-  // this function assembles actuation values indexed by JointActuatorIndex.
+  // this function assembles actuation values into the vector `actuation`. The
+  // actuation value for a particular actuator can be found at offset
+  // JointActuator::input_start() in `actuation` (see
+  // MultibodyPlant::get_actuation_input_port()).
   void CalcActuationOutput(const systems::Context<T>& context,
                            systems::BasicVector<T>* actuation) const;
 
   // For models with joint actuators with PD control, this method helps to
   // assemble desired states for the full model from the input ports for
   // individual model instances.
-  // The return stacks desired state as xd = [qd, vd], with both qd and vd
-  // indexed by JointActuatorIndex (it is assumed that qd.size() == vd.size()).
+  // The return stacks desired state as xd = [qd, vd].
+  // The actuation value for a particular actuator can be found at offset
+  // JointActuator::input_start() in both qd and vd (see
+  // MultibodyPlant::get_actuation_input_port()).
   VectorX<T> AssembleDesiredStateInput(
       const systems::Context<T>& context) const;
 
@@ -5925,7 +5808,7 @@ struct AddMultibodyPlantSceneGraphResult final {
   // Returns the N-th member referenced by this struct.
   // If N = 0, returns the reference to the MultibodyPlant.
   // If N = 1, returns the reference to the geometry::SceneGraph.
-  // Provided to support C++17's structured binding.
+  // Provided to support C++'s structured binding.
   template <std::size_t N>
   decltype(auto) get() const {
     if constexpr (N == 0)
@@ -6010,7 +5893,7 @@ void MultibodyPlant<symbolic::Expression>::CalcHydroelasticWithFallback(
 }  // namespace drake
 
 #ifndef DRAKE_DOXYGEN_CXX
-// Specializations provided to support C++17's structured binding for
+// Specializations provided to support C++'s structured binding for
 // AddMultibodyPlantSceneGraphResult.
 namespace std {
 // The GCC standard library defines tuple_size as class and struct which

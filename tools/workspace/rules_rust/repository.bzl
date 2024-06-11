@@ -11,10 +11,10 @@ def rules_rust_repository(
     github_archive(
         name = name,
         repository = "bazelbuild/rules_rust",  # License: Apache-2.0
-        commit = "0.38.0",
-        sha256 = "5873326d431bdd5fc0a3e0be3d060580ea0ea477c62bd64e299be1b0b7eeacf4",  # noqa
-        patches = (extra_patches or []) + [
-            ":patches/license_filegroup.patch",
-        ],
+        commit = "0.42.1",
+        sha256 = "64562052dbce93d0d41d36511a10047b0bfd51704a75b69288544a7b2f5c4264",  # noqa
+        patches = [
+            ":patches/import_cycle.patch",
+        ] + (extra_patches or []),
         mirrors = mirrors,
     )

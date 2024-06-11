@@ -95,8 +95,8 @@ std::optional<Eigen::VectorXd> Hyperrectangle::DoMaybeGetFeasiblePoint() const {
   return (ub_ + lb_) / 2.0;
 }
 
-bool Hyperrectangle::DoPointInSet(const Eigen::Ref<const Eigen::VectorXd>& x,
-                                  double tol) const {
+std::optional<bool> Hyperrectangle::DoPointInSetShortcut(
+    const Eigen::Ref<const Eigen::VectorXd>& x, double tol) const {
   return (x.array() >= lb_.array() - tol).all() &&
          (x.array() <= ub_.array() + tol).all();
 }
@@ -185,6 +185,16 @@ Eigen::VectorXd Hyperrectangle::Center() const {
 
 HPolyhedron Hyperrectangle::MakeHPolyhedron() const {
   return HPolyhedron::MakeBox(lb_, ub_);
+}
+
+std::optional<Hyperrectangle> Hyperrectangle::MaybeGetIntersection(
+    const Hyperrectangle& other) const {
+  DRAKE_THROW_UNLESS(this->ambient_dimension() == other.ambient_dimension());
+  if ((lb_.array() > other.ub_.array()).any() ||
+      (ub_.array() < other.lb_.array()).any()) {
+    return std::nullopt;
+  }
+  return Hyperrectangle(lb_.cwiseMax(other.lb_), ub_.cwiseMin(other.ub_));
 }
 
 std::pair<std::unique_ptr<Shape>, math::RigidTransformd>

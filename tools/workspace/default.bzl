@@ -1,8 +1,7 @@
 load("//tools/workspace:mirrors.bzl", "DEFAULT_MIRRORS")
-load("//tools/workspace:os.bzl", "os_repository")
 load("//tools/workspace/abseil_cpp_internal:repository.bzl", "abseil_cpp_internal_repository")  # noqa
-load("//tools/workspace/bazelisk:repository.bzl", "bazelisk_repository")
 load("//tools/workspace/bazel_skylib:repository.bzl", "bazel_skylib_repository")  # noqa
+load("//tools/workspace/bazelisk:repository.bzl", "bazelisk_repository")
 load("//tools/workspace/blas:repository.bzl", "blas_repository")
 load("//tools/workspace/build_bazel_apple_support:repository.bzl", "build_bazel_apple_support_repository")  # noqa
 load("//tools/workspace/buildifier:repository.bzl", "buildifier_repository")
@@ -19,8 +18,8 @@ load("//tools/workspace/conex_internal:repository.bzl", "conex_internal_reposito
 load("//tools/workspace/crate_universe:repository.bzl", "crate_universe_repositories")  # noqa
 load("//tools/workspace/csdp_internal:repository.bzl", "csdp_internal_repository")  # noqa
 load("//tools/workspace/curl_internal:repository.bzl", "curl_internal_repository")  # noqa
-load("//tools/workspace/doxygen:repository.bzl", "doxygen_repository")
 load("//tools/workspace/dm_control_internal:repository.bzl", "dm_control_internal_repository")  # noqa
+load("//tools/workspace/doxygen:repository.bzl", "doxygen_repository")
 load("//tools/workspace/drake_models:repository.bzl", "drake_models_repository")  # noqa
 load("//tools/workspace/eigen:repository.bzl", "eigen_repository")
 load("//tools/workspace/fcl_internal:repository.bzl", "fcl_internal_repository")  # noqa
@@ -36,7 +35,6 @@ load("//tools/workspace/gurobi:repository.bzl", "gurobi_repository")
 load("//tools/workspace/gymnasium_py:repository.bzl", "gymnasium_py_repository")  # noqa
 load("//tools/workspace/gz_math_internal:repository.bzl", "gz_math_internal_repository")  # noqa
 load("//tools/workspace/gz_utils_internal:repository.bzl", "gz_utils_internal_repository")  # noqa
-load("//tools/workspace/intel_realsense_ros_internal:repository.bzl", "intel_realsense_ros_internal_repository")  # noqa
 load("//tools/workspace/ipopt:repository.bzl", "ipopt_repository")
 load("//tools/workspace/ipopt_internal_fromsource:repository.bzl", "ipopt_internal_fromsource_repository")  # noqa
 load("//tools/workspace/ipopt_internal_pkgconfig:repository.bzl", "ipopt_internal_pkgconfig_repository")  # noqa
@@ -90,6 +88,7 @@ load("//tools/workspace/stduuid_internal:repository.bzl", "stduuid_internal_repo
 load("//tools/workspace/styleguide:repository.bzl", "styleguide_repository")
 load("//tools/workspace/suitesparse_internal:repository.bzl", "suitesparse_internal_repository")  # noqa
 load("//tools/workspace/sympy_py_internal:repository.bzl", "sympy_py_internal_repository")  # noqa
+load("//tools/workspace/tinygltf_internal:repository.bzl", "tinygltf_internal_repository")  # noqa
 load("//tools/workspace/tinyobjloader_internal:repository.bzl", "tinyobjloader_internal_repository")  # noqa
 load("//tools/workspace/tinyxml2_internal:repository.bzl", "tinyxml2_internal_repository")  # noqa
 load("//tools/workspace/tomli_internal:repository.bzl", "tomli_internal_repository")  # noqa
@@ -156,10 +155,6 @@ def add_default_repositories(excludes = [], mirrors = DEFAULT_MIRRORS):
         doxygen_repository(name = "doxygen", mirrors = mirrors)
     if "dm_control_internal" not in excludes:
         dm_control_internal_repository(name = "dm_control_internal", mirrors = mirrors)  # noqa
-    if "drake_detected_os" not in excludes:
-        # The @drake_detected_os external is deprecated in Drake's WORKSPACE
-        # and will be removed on 2024-03-01.
-        os_repository(name = "drake_detected_os")
     if "drake_models" not in excludes:
         drake_models_repository(name = "drake_models", mirrors = mirrors)
     if "eigen" not in excludes:
@@ -190,8 +185,6 @@ def add_default_repositories(excludes = [], mirrors = DEFAULT_MIRRORS):
         gz_utils_internal_repository(name = "gz_utils_internal", mirrors = mirrors)  # noqa
     if "gymnasium_py" not in excludes:
         gymnasium_py_repository(name = "gymnasium_py", mirrors = mirrors)
-    if "intel_realsense_ros_internal" not in excludes:
-        intel_realsense_ros_internal_repository(name = "intel_realsense_ros_internal", mirrors = mirrors)  # noqa
     if "ipopt" not in excludes:
         ipopt_repository(name = "ipopt")
     if "ipopt_internal_fromsource" not in excludes:
@@ -217,7 +210,7 @@ def add_default_repositories(excludes = [], mirrors = DEFAULT_MIRRORS):
     if "meshcat" not in excludes:
         meshcat_repository(name = "meshcat", mirrors = mirrors)
     if "mosek" not in excludes:
-        mosek_repository(name = "mosek")
+        mosek_repository(name = "mosek", mirrors = mirrors)
     if "mpmath_py_internal" not in excludes:
         mpmath_py_internal_repository(name = "mpmath_py_internal", mirrors = mirrors)  # noqa
     if "msgpack_internal" not in excludes:
@@ -241,6 +234,8 @@ def add_default_repositories(excludes = [], mirrors = DEFAULT_MIRRORS):
     if "onetbb_internal" not in excludes:
         onetbb_internal_repository(name = "onetbb_internal", mirrors = mirrors)
     if "openblas" not in excludes:
+        # The @openblas external is deprecated in Drake's WORKSPACE and will be
+        # removed on or after 2024-09-01.
         openblas_repository(name = "openblas")
     if "opencl" not in excludes:
         opencl_repository(name = "opencl")
@@ -298,6 +293,8 @@ def add_default_repositories(excludes = [], mirrors = DEFAULT_MIRRORS):
         suitesparse_internal_repository(name = "suitesparse_internal", mirrors = mirrors)  # noqa
     if "sympy_py_internal" not in excludes:
         sympy_py_internal_repository(name = "sympy_py_internal", mirrors = mirrors)  # noqa
+    if "tinygltf_internal" not in excludes:
+        tinygltf_internal_repository(name = "tinygltf_internal", mirrors = mirrors)  # noqa
     if "tinyobjloader_internal" not in excludes:
         tinyobjloader_internal_repository(name = "tinyobjloader_internal", mirrors = mirrors)  # noqa
     if "tinyxml2_internal" not in excludes:

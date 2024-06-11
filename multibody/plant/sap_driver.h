@@ -113,6 +113,11 @@ class SapDriver {
   void CalcActuation(const systems::Context<T>& context,
                      VectorX<T>* actuation) const;
 
+  // Evaluates a cache entry storing the SapContactProblem to be solved at the
+  // state stored in `context`.
+  const ContactProblemCache<T>& EvalContactProblemCache(
+      const systems::Context<T>& context) const;
+
  private:
   // Provide private access for unit testing only.
   friend class SapDriverTest;
@@ -263,10 +268,6 @@ class SapDriver {
   void CalcContactProblemCache(const systems::Context<T>& context,
                                ContactProblemCache<T>* cache) const;
 
-  // Eval version of CalcContactProblemCache()
-  const ContactProblemCache<T>& EvalContactProblemCache(
-      const systems::Context<T>& context) const;
-
   // Computes the discrete update from the state stored in the context. The
   // resulting next time step velocities and constraint impulses are stored in
   // `sap_results`.
@@ -286,9 +287,6 @@ class SapDriver {
   const double near_rigid_threshold_;
   systems::CacheIndex contact_problem_;
   systems::CacheIndex sap_results_;
-  // Vector of joint damping coefficients, of size plant().num_velocities().
-  // This information is extracted during the call to ExtractModelInfo().
-  VectorX<T> joint_damping_;
   // Parameters for SAP.
   contact_solvers::internal::SapSolverParameters sap_parameters_;
 };

@@ -6,8 +6,8 @@
 #include <gtest/gtest.h>
 #include <msgpack.hpp>
 
-#include "drake/common/find_resource.h"
 #include "drake/common/test_utilities/expect_throws_message.h"
+#include "drake/geometry/meshcat_internal.h"
 #include "drake/geometry/meshcat_types_internal.h"
 #include "drake/multibody/parsing/parser.h"
 #include "drake/multibody/plant/multibody_plant.h"
@@ -19,6 +19,7 @@ namespace drake {
 namespace geometry {
 namespace {
 
+using internal::TransformGeometryName;
 using multibody::AddMultibodyPlantSceneGraph;
 
 // The tests in this file require a dependency on MultibodyPlant.  One could
@@ -45,9 +46,9 @@ class MeshcatVisualizerWithIiwaTest : public ::testing::Test {
     auto [plant, scene_graph] = AddMultibodyPlantSceneGraph(&builder, 0.001);
     plant_ = &plant;
     scene_graph_ = &scene_graph;
-    multibody::Parser(plant_).AddModels(
-        FindResourceOrThrow("drake/manipulation/models/iiwa_description/urdf/"
-                            "iiwa14_spheres_collision.urdf"));
+    multibody::Parser(plant_).AddModelsFromUrl(
+        "package://drake_models/iiwa_description/urdf/"
+        "iiwa14_spheres_collision.urdf");
     plant.WeldFrames(plant.world_frame(),
                      plant.GetBodyByName("base").body_frame());
     plant.Finalize();
@@ -139,7 +140,8 @@ TEST_F(MeshcatVisualizerWithIiwaTest, Roles) {
         plant_->GetBodyByName("iiwa_link_7").index());
     for (GeometryId geom_id : inspector.GetGeometries(iiwa_link_7, role)) {
       EXPECT_TRUE(meshcat_->HasPath(
-          fmt::format("visualizer/iiwa14/iiwa_link_7/{}", geom_id)));
+          fmt::format("visualizer/iiwa14/iiwa_link_7/{}",
+                      TransformGeometryName(geom_id, inspector))));
     }
     meshcat_->Delete();
   }
@@ -249,8 +251,6 @@ bool has_iiwa_frame(const MeshcatAnimation& animation, int frame) {
 TEST_F(MeshcatVisualizerWithIiwaTest, Recording) {
   MeshcatVisualizerParams params;
   SetUpDiagram(params);
-  DRAKE_EXPECT_THROWS_MESSAGE(visualizer_->get_mutable_recording(),
-                              ".*You must create a recording.*");
 
   // Publish once without recording and confirm that we don't have the iiwa
   // frame.
@@ -400,14 +400,67 @@ GTEST_TEST(MeshcatVisualizerTest, HydroGeometry) {
     // tell us whether or not hydro was used -- the normal representation is
     // just the ellipse axes (very small); the hydro representation is all
     // of the tessellated faces (very large).
-    const std::string data = meshcat->GetPackedObject(fmt::format(
-        "/drake/{}/two_bodies/body1/{}", prefix, sphere1.get_value()));
+    const std::string data = meshcat->GetPackedObject(
+        fmt::format("/drake/{}/two_bodies/body1/{}", prefix,
+                    TransformGeometryName(sphere1, inspector)));
     if (show_hydroelastic) {
       EXPECT_GT(data.size(), 5000);
+      // The BufferGeometry has explicitly declared its material to be flat
+      // shaded. The encoding includes the property name and the value \xC3 for
+      // true. (False is \xC2.)
+      EXPECT_THAT(data, testing::HasSubstr("flatShading\xC3")) << data;
     } else {
       EXPECT_LT(data.size(), 1000);
     }
   }
+}
+
+// When visualizing proximity geometry, if a geometry has a convex hull it is
+// used in place of the geometry.
+GTEST_TEST(MeshcatVisualizerTest, ConvexHull) {
+  auto meshcat = std::make_shared<Meshcat>();
+
+  // Load a scene with mesh collision geometry.
+  systems::DiagramBuilder<double> builder;
+  auto [plant, scene_graph] = AddMultibodyPlantSceneGraph(&builder, 0.001);
+  multibody::Parser(&plant).AddModelsFromUrl(
+      "package://drake/geometry/render/test/box.sdf");
+  plant.Finalize();
+
+  // Dig out a GeometryId that we just loaded.
+  const auto& inspector = scene_graph.model_inspector();
+  const GeometryId box_id =
+      inspector.GetAllGeometryIds(Role::kProximity).front();
+  ASSERT_EQ(inspector.GetName(box_id), "box::collision");
+  ASSERT_NE(inspector.GetConvexHull(box_id), nullptr);
+  ASSERT_EQ(inspector.GetShape(box_id).type_name(), "Mesh");
+  // We didn't add anything with a hydroelastic representation.
+  ASSERT_TRUE(std::holds_alternative<std::monostate>(
+      inspector.maybe_get_hydroelastic_mesh(box_id)));
+
+  // Add a proximity visualizer.
+  // We set show_hydroelastic to true to make sure the convex hull still comes
+  // through for meshes that don't have hydro representations (see above).
+  // This does *not* test the case where a mesh has both a hydro representation
+  // and a convex mesh. The test criterion below (BufferGeometry) is unable to
+  // distinguish between visualized hydro geometry and convex hull.
+  MeshcatVisualizerParams params{.role = Role::kProximity,
+                                 .show_hydroelastic = true};
+  MeshcatVisualizer<double>::AddToBuilder(&builder, scene_graph, meshcat,
+                                          params);
+
+  // Send the geometry to Meshcat.
+  auto diagram = builder.Build();
+  auto context = diagram->CreateDefaultContext();
+  diagram->ForcedPublish(*context);
+
+  // Read back the mesh shape. The message would have type _meshfile_object if
+  // the obj had been sent. If, however, the generated convex hull is sent, the
+  // type will be BufferGeometry.
+  const std::string data = meshcat->GetPackedObject(
+      fmt::format("/drake/{}/box/box/{}", params.prefix,
+                  TransformGeometryName(box_id, inspector)));
+  EXPECT_THAT(data, testing::HasSubstr("BufferGeometry"));
 }
 
 GTEST_TEST(MeshcatVisualizerTest, MultipleModels) {
@@ -415,13 +468,14 @@ GTEST_TEST(MeshcatVisualizerTest, MultipleModels) {
 
   systems::DiagramBuilder<double> builder;
   auto [plant, scene_graph] = AddMultibodyPlantSceneGraph(&builder, 0.001);
-  std::string urdf = FindResourceOrThrow(
-      "drake/manipulation/models/iiwa_description/urdf/"
-      "iiwa14_no_collision.urdf");
-  auto iiwa0 = multibody::Parser(&plant).AddModels(urdf).at(0);
+  const std::string urdf_url =
+      "package://drake_models/iiwa_description/urdf/"
+      "iiwa14_no_collision.urdf";
+  auto iiwa0 = multibody::Parser(&plant).AddModelsFromUrl(urdf_url).at(0);
   plant.WeldFrames(plant.world_frame(),
                    plant.GetBodyByName("base", iiwa0).body_frame());
-  auto iiwa1 = multibody::Parser(&plant, "second").AddModels(urdf).at(0);
+  auto iiwa1 =
+      multibody::Parser(&plant, "second").AddModelsFromUrl(urdf_url).at(0);
   plant.WeldFrames(plant.world_frame(),
                    plant.GetBodyByName("base", iiwa1).body_frame());
   plant.Finalize();
@@ -501,8 +555,8 @@ GTEST_TEST(MeshcatVisualizerTest, AcceptingProperty) {
       auto context = diagram->CreateDefaultContext();
 
       // Publish geometry. Check whether the shape was published.
-      const std::string geom_path =
-          fmt::format("prefix/box/box/{}", geom_id.get_value());
+      const std::string geom_path = fmt::format(
+          "prefix/box/box/{}", TransformGeometryName(geom_id, inspector));
       const bool should_show =
           (accepting == "prefix") ||
           (include_unspecified_accepting && accepting.empty());
@@ -512,12 +566,18 @@ GTEST_TEST(MeshcatVisualizerTest, AcceptingProperty) {
   }
 }
 
-// Full system acceptance test of setting alpha slider values.
+// Full system acceptance test of setting alpha slider values (including the
+// initial value).
 TEST_F(MeshcatVisualizerWithIiwaTest, AlphaSlidersSystemCheck) {
-  MeshcatVisualizerParams params;
-  params.enable_alpha_slider = true;
+  // Note: due to the quantizing effect of the slider, we can't set an
+  // arbitrary value for the initial slider value and expect a perfect match.
+  // Only values that are integer multiples of 0.02 will work.
+  const MeshcatVisualizerParams params{.enable_alpha_slider = true,
+                                       .initial_alpha_slider_value = 0.5};
   SetUpDiagram(params);
   systems::Simulator<double> simulator(*diagram_);
+
+  EXPECT_EQ(meshcat_->GetSliderValue("visualizer α"), 0.5);
 
   // Simulate for a moment and publish to populate the visualizer.
   simulator.AdvanceTo(0.1);
@@ -567,8 +627,8 @@ GTEST_TEST(MeshcatVisualizerTest, AlphaSliderCheckResults) {
       inspector.GetGeometries(body_frame, Role::kIllustration);
   DRAKE_DEMAND(geom_ids.size() == 1);
   const GeometryId geom_id = *geom_ids.begin();
-  const std::string geom_path =
-      fmt::format("visualizer/box/box/{}", geom_id.get_value());
+  const std::string geom_path = fmt::format(
+      "visualizer/box/box/{}", TransformGeometryName(geom_id, inspector));
 
   // Create the visualizer.
   MeshcatVisualizerParams params;

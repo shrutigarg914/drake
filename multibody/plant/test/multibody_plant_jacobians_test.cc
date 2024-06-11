@@ -5,7 +5,6 @@
 #include <gtest/gtest.h>
 
 #include "drake/common/autodiff.h"
-#include "drake/common/find_resource.h"
 #include "drake/common/test_utilities/eigen_matrix_compare.h"
 #include "drake/math/autodiff_gradient.h"
 #include "drake/math/rigid_transform.h"
@@ -75,7 +74,7 @@ void CalcJacobianViaPartialDerivativesOfPositionWithRespectToQ(
 TEST_F(KukaIiwaModelTests, FixtureInvariants) {
   // Sanity check basic invariants.
   // Seven dofs for the arm plus floating base.
-  EXPECT_EQ(plant_->num_joints(), kNumJoints);
+  EXPECT_EQ(plant_->num_joints(), kNumRevoluteJoints + kNumFloatingJoints);
   EXPECT_EQ(plant_->num_positions(), kNumPositions);
   EXPECT_EQ(plant_->num_velocities(), kNumVelocities);
 }

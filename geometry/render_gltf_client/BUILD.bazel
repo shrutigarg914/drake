@@ -1,3 +1,4 @@
+load("//tools/lint:lint.bzl", "add_lint_tests")
 load(
     "//tools/skylark:drake_cc.bzl",
     "drake_cc_binary",
@@ -10,7 +11,6 @@ load(
     "drake_py_binary",
     "drake_py_unittest",
 )
-load("//tools/lint:lint.bzl", "add_lint_tests")
 load("//tools/skylark:test_tags.bzl", "vtk_test_tags")
 
 package(default_visibility = ["//visibility:private"])
@@ -257,7 +257,7 @@ drake_py_binary(
     srcs = ["test/server_demo.py"],
     data = [":server_vtk_backend"],
     deps = [
-        "@bazel_tools//tools/python/runfiles",
+        "@rules_python//python/runfiles",
     ],
 )
 
@@ -270,7 +270,6 @@ drake_cc_binary(
         "//geometry/render_vtk:factory",
         "//geometry/render_vtk:internal_render_engine_vtk",
         "//math:geometric_transform",
-        "//systems/sensors:color_palette",
         "//systems/sensors:image",
         "@gflags",
         "@vtk_internal//:vtkCommonCore",
@@ -286,10 +285,20 @@ filegroup(
     name = "gltf_client_test_models",
     testonly = True,
     data = [
+        ":test/006_mustard_bottle.sdf",
         ":test/4_color_texture.png",
         ":test/example_scene.sdf",
     ],
     visibility = ["//:__pkg__"],
+)
+
+# The integration test was written using OBJ-based model files, so even though
+# our nominal mesh format is glTF now, we'll still use OBJ for our testing.
+genrule(
+    name = "gen_mustard_bottle",
+    srcs = ["@drake_models//:ycb/006_mustard_bottle.sdf"],
+    outs = ["test/006_mustard_bottle.sdf"],
+    cmd = "sed -e 's#\\.gltf#.obj#g;' $< > $@",
 )
 
 drake_cc_binary(
@@ -298,7 +307,7 @@ drake_cc_binary(
     srcs = ["test/client_demo.cc"],
     data = [
         ":gltf_client_test_models",
-        "//manipulation/models/ycb:models",
+        "@drake_models//:ycb",
     ],
     deps = [
         ":factory",
@@ -328,7 +337,7 @@ drake_py_unittest(
         ":server_vtk_backend",
     ],
     deps = [
-        "@bazel_tools//tools/python/runfiles",
+        "@rules_python//python/runfiles",
     ],
 )
 
@@ -350,7 +359,7 @@ drake_py_unittest(
         "cpu:2",
     ],
     deps = [
-        "@bazel_tools//tools/python/runfiles",
+        "@rules_python//python/runfiles",
     ],
 )
 
@@ -394,7 +403,7 @@ drake_py_unittest(
         ":all_gltfs_and_images",
     ],
     deps = [
-        "@bazel_tools//tools/python/runfiles",
+        "@rules_python//python/runfiles",
     ],
 )
 

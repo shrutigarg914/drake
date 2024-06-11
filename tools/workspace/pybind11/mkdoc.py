@@ -49,9 +49,8 @@ import sys
 from clang import cindex
 from clang.cindex import AccessSpecifier, CursorKind, TypeKind
 
-from drake.tools.workspace.pybind11.mkdoc_comment import process_comment
-
-from drake.tools.workspace.pybind11.libclang_setup import add_library_paths
+from tools.workspace.pybind11.libclang_setup import add_library_paths
+from tools.workspace.pybind11.mkdoc_comment import process_comment
 
 
 CLASS_KINDS = [
@@ -737,7 +736,7 @@ def main():
     os.mkdir(tmpdir)
     glue_filename = os.path.join(tmpdir, "mkdoc_glue.h")
     with open(glue_filename, 'w') as glue_f:
-        # As the first line of the glue file, include a C++17 standard library
+        # As the first line of the glue file, include a C++ standard library
         # file to sanity check that it's working, before we start processing
         # the user headers.
         glue_f.write("#include <optional>\n")

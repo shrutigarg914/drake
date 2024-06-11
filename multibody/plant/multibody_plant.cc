@@ -24,10 +24,12 @@
 #include "drake/multibody/plant/hydroelastic_traction_calculator.h"
 #include "drake/multibody/plant/make_discrete_update_manager.h"
 #include "drake/multibody/plant/slicing_and_indexing.h"
+#include "drake/multibody/tree/door_hinge.h"
 #include "drake/multibody/tree/prismatic_joint.h"
+#include "drake/multibody/tree/prismatic_spring.h"
 #include "drake/multibody/tree/quaternion_floating_joint.h"
 #include "drake/multibody/tree/revolute_joint.h"
-
+#include "drake/multibody/tree/revolute_spring.h"
 namespace drake {
 namespace multibody {
 
@@ -263,7 +265,7 @@ std::string GetScopedName(const MultibodyPlant<T>& plant,
 // controlled.
 template <typename T>
 bool AnyActuatorHasPdControl(const MultibodyPlant<T>& plant) {
-  for (JointActuatorIndex a(0); a < plant.num_actuators(); ++a) {
+  for (JointActuatorIndex a : plant.GetJointActuatorIndices()) {
     if (plant.get_joint_actuator(a).has_controller()) return true;
   }
   return false;
@@ -275,7 +277,7 @@ template <typename T>
 int NumOfPdControlledActuators(const MultibodyPlant<T>& plant,
                                ModelInstanceIndex model_instance) {
   int num_actuators = 0;
-  for (JointActuatorIndex a(0); a < plant.num_actuators(); ++a) {
+  for (JointActuatorIndex a : plant.GetJointActuatorIndices()) {
     const JointActuator<T>& actuator = plant.get_joint_actuator(a);
     if (actuator.model_instance() == model_instance &&
         actuator.has_controller()) {
@@ -403,7 +405,7 @@ MultibodyPlant<T>::MultibodyPlant(const MultibodyPlant<U>& other)
     // called because `FinalizePlantOnly()` has to allocate system resources
     // requested by physical models.
     for (auto& model : other.physical_models_) {
-      auto cloned_model = model->template CloneToScalar<T>();
+      auto cloned_model = model->template CloneToScalar<T>(this);
       // TODO(xuchenhan-tri): Rework physical model and discrete update manager
       //  to eliminate the requirement on the order that they are called with
       //  respect to Finalize().
@@ -449,7 +451,7 @@ bool MultibodyPlant<T>::GetConstraintActiveStatus(
   this->ValidateContext(context);
   const std::map<MultibodyConstraintId, bool>& constraint_active_status =
       this->GetConstraintActiveStatus(context);
-  DRAKE_THROW_UNLESS(constraint_active_status.count(id) > 0);
+  DRAKE_THROW_UNLESS(constraint_active_status.contains(id));
   return constraint_active_status.at(id);
 }
 
@@ -461,7 +463,7 @@ void MultibodyPlant<T>::SetConstraintActiveStatus(systems::Context<T>* context,
   this->ValidateContext(context);
   std::map<MultibodyConstraintId, bool>& constraint_active_status =
       this->GetMutableConstraintActiveStatus(context);
-  DRAKE_THROW_UNLESS(constraint_active_status.count(id) > 0);
+  DRAKE_THROW_UNLESS(constraint_active_status.contains(id));
   constraint_active_status[id] = status;
 }
 
@@ -680,7 +682,7 @@ std::string MultibodyPlant<T>::GetTopologyGraphvizString() const {
     graphviz += "}\n";
   }
   // Add the graph edges (via the joints).
-  for (JointIndex joint_index(0); joint_index < num_joints(); ++joint_index) {
+  for (JointIndex joint_index : GetJointIndices()) {
     const Joint<T>& joint = get_joint(joint_index);
     graphviz += fmt::format(
         "body{} -> body{} [label=\"{} [{}]\"];\n", joint.child_body().index(),
@@ -778,6 +780,51 @@ void MultibodyPlant<T>::SetFreeBodyRandomRotationDistributionToUniform(
 }
 
 template <typename T>
+void MultibodyPlant<T>::RemoveJoint(const Joint<T>& joint) {
+  // Check for non-zero number of user-added force elements. (There is always 1
+  // force element, the gravity field added when the tree is constructed.)
+  if (num_force_elements() > 1) {
+    throw std::logic_error(fmt::format(
+        "{}: This plant has {} user-added force elements. This plant must have "
+        "0 user-added force elements in order to remove joint with index {}.",
+        __func__, num_force_elements() - 1, joint.index()));
+  }
+
+  // Check for non-zero number of user-added constraints.
+  if (num_constraints() > 0) {
+    throw std::logic_error(fmt::format(
+        "{}: This plant has {} user-added constraints. This plant must have "
+        "0 user-added constraints in order to remove joint with index {}.",
+        __func__, num_constraints(), joint.index()));
+  }
+
+  // Check for dependent JointActuators in the plant. Throw if any actuator
+  // depends on the joint to be removed.
+  // TODO(#21415): Find a way to make checking an element for dependency on a
+  // Joint more robust and uniform across all MultibodyElements and constraints.
+  std::vector<std::string> dependent_elements;
+
+  // Check JointActuators.
+  for (JointActuatorIndex index : GetJointActuatorIndices()) {
+    const JointActuator<T>& actuator = get_joint_actuator(index);
+    if (actuator.joint().index() == joint.index()) {
+      dependent_elements.push_back(
+          fmt::format("JointActuator(name: {}, index: {})", actuator.name(),
+                      actuator.index()));
+    }
+  }
+
+  if (dependent_elements.size() > 0) {
+    throw std::logic_error(fmt::format(
+        "{}: joint with index {} has the following dependent model elements "
+        "which must be removed prior to joint removal: [{}].",
+        __func__, joint.index(), fmt::join(dependent_elements, ", ")));
+  }
+
+  this->mutable_tree().RemoveJoint(joint);
+}
+
+template <typename T>
 const WeldJoint<T>& MultibodyPlant<T>::WeldFrames(
     const Frame<T>& frame_on_parent_F, const Frame<T>& frame_on_child_M,
     const math::RigidTransform<double>& X_FM) {
@@ -800,6 +847,11 @@ const JointActuator<T>& MultibodyPlant<T>::AddJointActuator(
         joint.name(), joint.num_velocities()));
   }
   return this->mutable_tree().AddJointActuator(name, joint, effort_limit);
+}
+
+template <typename T>
+void MultibodyPlant<T>::RemoveJointActuator(const JointActuator<T>& actuator) {
+  this->mutable_tree().RemoveJointActuator(actuator);
 }
 
 template <typename T>
@@ -966,9 +1018,11 @@ std::vector<BodyIndex> MultibodyPlant<T>::GetBodiesKinematicallyAffectedBy(
     const std::vector<JointIndex>& joint_indexes) const {
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   for (const JointIndex& joint : joint_indexes) {
-    if (!joint.is_valid() || joint >= num_joints()) {
-      throw std::logic_error(fmt::format(
-          "{}: No joint with index {} has been registered.", __func__, joint));
+    if (!has_joint(joint)) {
+      throw std::logic_error(
+          fmt::format("{}: No joint with index {} has been registered or it "
+                      "has been removed.",
+                      __func__, joint));
     }
     if (get_joint(joint).num_velocities() == 0) {
       throw std::logic_error(
@@ -1117,17 +1171,11 @@ void MultibodyPlant<T>::RenameModelInstance(ModelInstanceIndex model_instance,
     // alone.
     auto& inspector = scene_graph_->model_inspector();
 
-    // TODO(rpoyner-tri): replace with c++ built-in starts_with once we drop
-    // C++17 support.
-    auto starts_with = [](const std::string& str, const std::string& prefix) {
-      return str.compare(0, prefix.size(), prefix) == 0;
-    };
-
     const std::string old_prefix(old_name + "::");
     const std::string new_prefix(name + "::");
     auto maybe_make_new_name = [&](auto id) {
       std::string existing_name(inspector.GetName(id));
-      if (starts_with(existing_name, old_prefix)) {
+      if (existing_name.starts_with(old_prefix)) {
         // Replace old prefix with new prefix.
         return new_prefix + existing_name.substr(old_prefix.size());
       }
@@ -1185,7 +1233,7 @@ void MultibodyPlant<T>::Finalize() {
 
 template <typename T>
 void MultibodyPlant<T>::SetUpJointLimitsParameters() {
-  for (JointIndex joint_index(0); joint_index < num_joints(); ++joint_index) {
+  for (JointIndex joint_index : GetJointIndices()) {
     // Currently MultibodyPlant applies these "compliant" joint limit forces
     // using an explicit Euler strategy. Stability analysis of the explicit
     // Euler applied to the harmonic oscillator (the model used for these
@@ -1285,13 +1333,12 @@ void MultibodyPlant<T>::FinalizePlantOnly() {
 template <typename T>
 MatrixX<T> MultibodyPlant<T>::MakeActuationMatrix() const {
   MatrixX<T> B = MatrixX<T>::Zero(num_velocities(), num_actuated_dofs());
-  for (JointActuatorIndex actuator_index(0); actuator_index < num_actuators();
-       ++actuator_index) {
+  for (JointActuatorIndex actuator_index : GetJointActuatorIndices()) {
     const JointActuator<T>& actuator = get_joint_actuator(actuator_index);
     // This method assumes actuators on single dof joints. Assert this
     // condition.
     DRAKE_DEMAND(actuator.joint().num_velocities() == 1);
-    B(actuator.joint().velocity_start(), int{actuator.index()}) = 1;
+    B(actuator.joint().velocity_start(), actuator.input_start()) = 1;
   }
   return B;
 }
@@ -1302,14 +1349,13 @@ MultibodyPlant<T>::MakeActuationMatrixPseudoinverse() const {
   // We leverage here the assumption that B (the actuation matrix) is a
   // permutation matrix, so Bᵀ is the pseudoinverse.
   std::vector<Eigen::Triplet<double>> triplets;
-  for (JointActuatorIndex actuator_index(0); actuator_index < num_actuators();
-       ++actuator_index) {
+  for (JointActuatorIndex actuator_index : GetJointActuatorIndices()) {
     const JointActuator<T>& actuator = get_joint_actuator(actuator_index);
     // This method assumes actuators on single dof joints. Assert this
     // condition.
     DRAKE_DEMAND(actuator.joint().num_velocities() == 1);
     triplets.push_back(Eigen::Triplet<double>(
-        int{actuator.index()}, actuator.joint().velocity_start(), 1.0));
+        actuator.input_start(), actuator.joint().velocity_start(), 1.0));
   }
 
   Eigen::SparseMatrix<double> Bplus(num_actuated_dofs(), num_velocities());
@@ -1404,7 +1450,7 @@ void MultibodyPlant<T>::ApplyDefaultCollisionFilters() {
     // Disallow collisions between adjacent bodies. Adjacency is implied by the
     // existence of a joint between bodies, except in the case of 6-dof joints
     // or joints in which the parent body is `world`.
-    for (JointIndex j{0}; j < num_joints(); ++j) {
+    for (JointIndex j : GetJointIndices()) {
       const Joint<T>& joint = get_joint(j);
       const RigidBody<T>& child = joint.child_body();
       const RigidBody<T>& parent = joint.parent_body();
@@ -1536,7 +1582,7 @@ VectorX<T> MultibodyPlant<T>::GetDefaultPositions() const {
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   VectorX<T> q;
   q.setConstant(num_positions(), std::numeric_limits<double>::quiet_NaN());
-  for (JointIndex i{0}; i < num_joints(); ++i) {
+  for (JointIndex i : GetJointIndices()) {
     const Joint<T>& joint = get_joint(i);
     q.segment(joint.position_start(), joint.num_positions()) =
         joint.default_positions();
@@ -1559,7 +1605,7 @@ void MultibodyPlant<T>::SetDefaultPositions(
     const Eigen::Ref<const Eigen::VectorXd>& q) {
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   DRAKE_THROW_UNLESS(q.size() == num_positions());
-  for (JointIndex i{0}; i < num_joints(); ++i) {
+  for (JointIndex i : GetJointIndices()) {
     Joint<T>& joint = get_mutable_joint(i);
     joint.set_default_positions(
         q.segment(joint.position_start(), joint.num_positions()));
@@ -1589,8 +1635,8 @@ std::vector<std::string> MultibodyPlant<T>::GetPositionNames(
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   std::vector<std::string> names(num_positions());
 
-  for (int joint_index = 0; joint_index < num_joints(); ++joint_index) {
-    const Joint<T>& joint = get_joint(JointIndex(joint_index));
+  for (JointIndex joint_index : GetJointIndices()) {
+    const Joint<T>& joint = get_joint(joint_index);
     const std::string prefix =
         add_model_instance_prefix
             ? fmt::format("{}_", GetModelInstanceName(joint.model_instance()))
@@ -1652,8 +1698,8 @@ std::vector<std::string> MultibodyPlant<T>::GetVelocityNames(
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   std::vector<std::string> names(num_velocities());
 
-  for (int joint_index = 0; joint_index < num_joints(); ++joint_index) {
-    const Joint<T>& joint = get_joint(JointIndex(joint_index));
+  for (JointIndex joint_index : GetJointIndices()) {
+    const Joint<T>& joint = get_joint(joint_index);
     const std::string prefix =
         add_model_instance_prefix
             ? fmt::format("{}_", GetModelInstanceName(joint.model_instance()))
@@ -1739,10 +1785,8 @@ std::vector<std::string> MultibodyPlant<T>::GetActuatorNames(
   DRAKE_MBP_THROW_IF_NOT_FINALIZED();
   std::vector<std::string> names(num_actuators());
 
-  for (int actuator_index = 0; actuator_index < num_actuators();
-       ++actuator_index) {
-    const JointActuator<T>& actuator =
-        get_joint_actuator(JointActuatorIndex(actuator_index));
+  for (JointActuatorIndex actuator_index : GetJointActuatorIndices()) {
+    const JointActuator<T>& actuator = get_joint_actuator(actuator_index);
     const std::string prefix =
         add_model_instance_prefix
             ? fmt::format("{}_",
@@ -2347,13 +2391,12 @@ void MultibodyPlant<T>::AddJointActuationForces(
   DRAKE_DEMAND(forces->size() == num_velocities());
   if (num_actuators() > 0) {
     const VectorX<T> u = AssembleActuationInput(context);
-    for (JointActuatorIndex actuator_index(0); actuator_index < num_actuators();
-         ++actuator_index) {
+    for (JointActuatorIndex actuator_index : GetJointActuatorIndices()) {
       const JointActuator<T>& actuator = get_joint_actuator(actuator_index);
       const Joint<T>& joint = actuator.joint();
       // We only support actuators on single dof joints for now.
       DRAKE_DEMAND(joint.num_velocities() == 1);
-      (*forces)[joint.velocity_start()] += u[actuator_index];
+      (*forces)[joint.velocity_start()] += u[actuator.input_start()];
     }
   }
 }
@@ -2573,8 +2616,8 @@ void MultibodyPlant<symbolic::Expression>::CalcHydroelasticWithFallback(
   // TODO(SeanCurtis-TRI): Special case the AutoDiff scalar such that it works
   //  as long as there are no collisions -- akin to CalcPointPairPenetrations().
   throw std::domain_error(
-      fmt::format("This method doesn't support T = {}.",
-                  NiceTypeName::Get<symbolic::Expression>()));
+      "MultibodyPlant<T>::CalcHydroelasticWithFallback(): This method doesn't "
+      "support T = drake::symbolic::Expression.");
 }
 
 template <typename T>
@@ -2599,7 +2642,7 @@ void MultibodyPlant<T>::CalcJointLockingCache(
 
   int unlocked_cursor = 0;
   int locked_cursor = 0;
-  for (JointIndex joint_index(0); joint_index < num_joints(); ++joint_index) {
+  for (JointIndex joint_index : GetJointIndices()) {
     const Joint<T>& joint = get_joint(joint_index);
     if (joint.is_locked(context)) {
       for (int k = 0; k < joint.num_velocities(); ++k) {
@@ -3107,7 +3150,7 @@ void MultibodyPlant<T>::DeclareStateCacheAndPorts() {
   // Let external model managers declare their state, cache and ports in
   // `this` MultibodyPlant.
   for (auto& physical_model : physical_models_) {
-    physical_model->DeclareSystemResources(this);
+    physical_model->DeclareSystemResources();
   }
 }
 
@@ -3534,7 +3577,7 @@ void MultibodyPlant<T>::CalcReactionForces(
 
   // Map mobilizer reaction forces to joint reaction forces and perform the
   // necessary frame conversions.
-  for (JointIndex joint_index(0); joint_index < num_joints(); ++joint_index) {
+  for (JointIndex joint_index : GetJointIndices()) {
     const Joint<T>& joint = get_joint(joint_index);
     const internal::MobilizerIndex mobilizer_index =
         internal_tree().get_joint_mobilizer(joint_index);
@@ -3590,7 +3633,7 @@ void MultibodyPlant<T>::CalcReactionForces(
     // Re-express in the joint's child frame Jc.
     const RotationMatrix<T> R_WJc = frame_Jc.CalcRotationMatrixInWorld(context);
     const RotationMatrix<T> R_JcW = R_WJc.inverse();
-    F_CJc_Jc_array->at(joint_index) = R_JcW * F_CJc_W;
+    F_CJc_Jc_array->at(joint.ordinal()) = R_JcW * F_CJc_W;
   }
 }
 
@@ -3623,6 +3666,26 @@ template <typename T>
 const systems::InputPort<T>& MultibodyPlant<T>::get_geometry_query_input_port()
     const {
   return systems::System<T>::get_input_port(geometry_query_port_);
+}
+
+template <typename T>
+const OutputPort<T>&
+MultibodyPlant<T>::get_deformable_body_configuration_output_port() const {
+  // TODO(xuchenhan-tri): enforce that there's only ever going to be one
+  // DeformableModel as part of #21355.
+  for (const std::unique_ptr<PhysicalModel<T>>& physical_model :
+       physical_models_) {
+    if (std::holds_alternative<const DeformableModel<T>*>(
+            physical_model->ToPhysicalModelPointerVariant())) {
+      const DeformableModel<T>* deformable_model =
+          std::get<const DeformableModel<T>*>(
+              physical_model->ToPhysicalModelPointerVariant());
+      DRAKE_DEMAND(deformable_model != nullptr);
+      return systems::System<T>::get_output_port(
+          deformable_model->configuration_output_port_index());
+    }
+  }
+  throw std::runtime_error("No deformable body in the plant.");
 }
 
 template <typename T>

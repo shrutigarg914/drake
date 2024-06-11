@@ -56,6 +56,7 @@ using drake::symbolic::Variable;
 using drake::symbolic::test::ExprEqual;
 using drake::symbolic::test::PolyEqual;
 using drake::symbolic::test::PolyNotEqual;
+using drake::symbolic::test::TupleVarEqual;
 
 using std::all_of;
 using std::cref;
@@ -392,8 +393,8 @@ GTEST_TEST(TestAddDecisionVariables, AddDecisionVariables1) {
   EXPECT_EQ(prog.FindDecisionVariableIndex(x2), 2);
   EXPECT_EQ(prog.initial_guess().rows(), 3);
   EXPECT_EQ(prog.decision_variables().rows(), 3);
-  EXPECT_GT(
-      prog.required_capabilities().count(ProgramAttribute::kBinaryVariable), 0);
+  EXPECT_TRUE(
+      prog.required_capabilities().contains(ProgramAttribute::kBinaryVariable));
 
   const auto decision_variable_index = prog.decision_variable_index();
   {
@@ -857,8 +858,7 @@ GTEST_TEST(TestMathematicalProgram, TestBadBindingVariable) {
   f.setConstant(2);
   lb.setConstant(0);
   ub.setConstant(1);
-  Eigen::Matrix3d twiceA = 2 * A;
-  vector<Eigen::Ref<const MatrixXd>> F{A, twiceA};
+  vector<MatrixXd> F{A, 2 * A};
   shared_ptr<EvaluatorBase> func = MakeFunctionEvaluator(Movable());
 
   // Test each constraint type.
@@ -1155,7 +1155,7 @@ GTEST_TEST(TestMathematicalProgram, AddEmptyConstraint) {
 
   auto binding7 =
       prog.AddConstraint(std::make_shared<LinearMatrixInequalityConstraint>(
-                             std::vector<Eigen::Ref<const Eigen::MatrixXd>>(
+                             std::vector<Eigen::MatrixXd>(
                                  {Eigen::MatrixXd(0, 0), Eigen::MatrixXd(0, 0),
                                   Eigen::MatrixXd(0, 0)})),
                          x);
@@ -1906,10 +1906,10 @@ GTEST_TEST(TestMathematicalProgram, AddLinearConstraintSymbolicFormulaAnd1) {
   set<Expression> constraint_set;
   constraint_set.emplace(x(0) + 2 * x(1) - 5);
   constraint_set.emplace(3 * x(0) + 4 * x(1) - 6);
-  EXPECT_EQ(constraint_set.count(Ax(0) - lb_in_constraint(0)), 1);
-  EXPECT_EQ(constraint_set.count(Ax(0) - ub_in_constraint(0)), 1);
-  EXPECT_EQ(constraint_set.count(Ax(1) - lb_in_constraint(1)), 1);
-  EXPECT_EQ(constraint_set.count(Ax(1) - ub_in_constraint(1)), 1);
+  EXPECT_TRUE(constraint_set.contains(Ax(0) - lb_in_constraint(0)));
+  EXPECT_TRUE(constraint_set.contains(Ax(0) - ub_in_constraint(0)));
+  EXPECT_TRUE(constraint_set.contains(Ax(1) - lb_in_constraint(1)));
+  EXPECT_TRUE(constraint_set.contains(Ax(1) - ub_in_constraint(1)));
 }
 
 GTEST_TEST(TestMathematicalProgram, AddLinearConstraintSymbolicFormulaAnd2) {
@@ -1946,15 +1946,13 @@ GTEST_TEST(TestMathematicalProgram, AddLinearConstraintSymbolicFormulaAnd2) {
   for (int i = 0; i < 3; ++i) {
     if (!std::isinf(lb_in_constraint(i))) {
       // Either `Ax - lb` or `-(Ax - lb)` should be in the constraint set.
-      EXPECT_EQ(constraint_set.count(Ax(i) - lb_in_constraint(i)) +
-                    constraint_set.count(-(Ax(i) - lb_in_constraint(i))),
-                1);
+      EXPECT_NE(constraint_set.contains(Ax(i) - lb_in_constraint(i)),
+                constraint_set.contains(-(Ax(i) - lb_in_constraint(i))));
     }
     if (!std::isinf(ub_in_constraint(i))) {
       // Either `Ax - ub` or `-(Ax - ub)` should be in the constraint set.
-      EXPECT_EQ(constraint_set.count(Ax(i) - ub_in_constraint(i)) +
-                    constraint_set.count(-(Ax(i) - ub_in_constraint(i))),
-                1);
+      EXPECT_NE(constraint_set.contains(Ax(i) - ub_in_constraint(i)),
+                constraint_set.contains(-(Ax(i) - ub_in_constraint(i))));
     }
   }
 }
@@ -3289,27 +3287,41 @@ GTEST_TEST(TestMathematicalProgram, AddL2NormCost) {
 
   auto obj1 =
       prog.AddCost(Binding<L2NormCost>(std::make_shared<L2NormCost>(A, b), x));
-  EXPECT_GT(prog.required_capabilities().count(ProgramAttribute::kL2NormCost),
-            0);
+  EXPECT_TRUE(prog.required_capabilities().contains(
+      ProgramAttribute::kL2NormCost));
   EXPECT_EQ(prog.l2norm_costs().size(), 1u);
   EXPECT_EQ(prog.GetAllCosts().size(), 1u);
 
   auto obj2 = prog.AddL2NormCost(A, b, x);
   EXPECT_EQ(prog.l2norm_costs().size(), 2u);
 
+  symbolic::Expression e = (A * x + b).norm();
+  auto obj3 = prog.AddL2NormCost(e, 1e-8, 1e-8);
+  EXPECT_EQ(prog.l2norm_costs().size(), 3u);
+
+  // Test that the AddCost method correctly recognizes the L2norm.
+  auto obj4 = prog.AddCost(e);
+  EXPECT_EQ(prog.l2norm_costs().size(), 4u);
+
   prog.RemoveCost(obj1);
   prog.RemoveCost(obj2);
+  prog.RemoveCost(obj3);
+  prog.RemoveCost(obj4);
   EXPECT_EQ(prog.l2norm_costs().size(), 0u);
-  EXPECT_EQ(prog.required_capabilities().count(ProgramAttribute::kL2NormCost),
-            0u);
+  EXPECT_FALSE(prog.required_capabilities().contains(
+      ProgramAttribute::kL2NormCost));
 
   prog.AddL2NormCost(A, b, {x.head<1>(), x.tail<1>()});
   EXPECT_EQ(prog.l2norm_costs().size(), 1u);
-  EXPECT_GT(prog.required_capabilities().count(ProgramAttribute::kL2NormCost),
-            0u);
+  EXPECT_TRUE(prog.required_capabilities().contains(
+      ProgramAttribute::kL2NormCost));
 
   auto new_prog = prog.Clone();
   EXPECT_EQ(new_prog->l2norm_costs().size(), 1u);
+
+  // AddL2NormCost(Expression) can throw.
+  e = (A*x + b).squaredNorm();
+  DRAKE_EXPECT_THROWS_MESSAGE(prog.AddL2NormCost(e), ".*is not an L2 norm.*");
 }
 
 GTEST_TEST(TestMathematicalProgram, AddQuadraticConstraint) {
@@ -4310,24 +4322,24 @@ void RemoveCostTest(MathematicalProgram* prog,
   EXPECT_EQ(prog->RemoveCost(cost1), 1);
   EXPECT_EQ(program_costs->size(), 1u);
   EXPECT_EQ(program_costs->at(0).evaluator().get(), cost2.evaluator().get());
-  EXPECT_GT(prog->required_capabilities().count(affected_capability), 0);
+  EXPECT_TRUE(prog->required_capabilities().contains(affected_capability));
   // Now add another cost2 to program. If we remove cost2, now we get a program
   // with empty linear cost.
   prog->AddCost(cost2);
   EXPECT_EQ(program_costs->size(), 2u);
   EXPECT_EQ(prog->RemoveCost(cost2), 2);
   EXPECT_EQ(program_costs->size(), 0u);
-  EXPECT_EQ(prog->required_capabilities().count(affected_capability), 0);
+  EXPECT_FALSE(prog->required_capabilities().contains(affected_capability));
 
   // Currently program_costs is empty.
   EXPECT_EQ(prog->RemoveCost(cost1), 0);
-  EXPECT_EQ(prog->required_capabilities().count(affected_capability), 0);
+  EXPECT_FALSE(prog->required_capabilities().contains(affected_capability));
 
   prog->AddCost(cost1);
   // prog doesn't contain cost2, removing cost2 from prog ends up as a no-opt.
   EXPECT_EQ(prog->RemoveCost(cost2), 0);
   EXPECT_EQ(program_costs->size(), 1u);
-  EXPECT_GT(prog->required_capabilities().count(affected_capability), 0);
+  EXPECT_TRUE(prog->required_capabilities().contains(affected_capability));
 
   // cost3 and cost1 share the same evaluator, but the associated variables are
   // different.
@@ -4337,7 +4349,7 @@ void RemoveCostTest(MathematicalProgram* prog,
   auto cost3 = prog->AddCost(cost1.evaluator(), cost3_vars);
   EXPECT_EQ(prog->RemoveCost(cost1), 1);
   EXPECT_EQ(program_costs->size(), 1u);
-  EXPECT_GT(prog->required_capabilities().count(affected_capability), 0);
+  EXPECT_TRUE(prog->required_capabilities().contains(affected_capability));
   EXPECT_EQ(program_costs->at(0).evaluator().get(), cost3.evaluator().get());
 }
 
@@ -4381,6 +4393,70 @@ GTEST_TEST(TestMathematicalProgram, TestToString) {
   EXPECT_THAT(s, testing::HasSubstr("3"));
 }
 
+GTEST_TEST(TestMathematicalProgram, RemoveDecisionVariable) {
+  // A program where x(1) is not associated with any cost/constraint.
+  MathematicalProgram prog;
+  auto x = prog.NewContinuousVariables<3>();
+  prog.AddLinearCost(x(0) + x(2));
+  prog.AddBoundingBoxConstraint(0, 2, x(0));
+  prog.AddLinearConstraint(x(0) + 2 * x(2) <= 1);
+  prog.SetInitialGuess(x, Eigen::Vector3d(0, 1, 2));
+  prog.SetVariableScaling(x(0), 0.5);
+  prog.SetVariableScaling(x(1), 3.0);
+  prog.SetVariableScaling(x(2), 4.0);
+
+  // Remove x(1) and check that all accessors remain in sync.
+  const int x1_index = prog.FindDecisionVariableIndex(x(1));
+  const int x1_index_removed = prog.RemoveDecisionVariable(x(1));
+  EXPECT_EQ(x1_index, x1_index_removed);
+  EXPECT_EQ(prog.num_vars(), 2);
+  EXPECT_EQ(prog.FindDecisionVariableIndex(x(0)), 0);
+  EXPECT_EQ(prog.FindDecisionVariableIndex(x(2)), 1);
+  EXPECT_THAT(prog.decision_variables(),
+              testing::Pointwise(testing::Truly(TupleVarEqual), {x(0), x(2)}));
+  EXPECT_TRUE(CompareMatrices(prog.initial_guess(), Eigen::Vector2d(0, 2)));
+  EXPECT_THAT(prog.GetVariableScaling(),
+              testing::WhenSorted(testing::ElementsAre(
+                  std::make_pair(0, 0.5), std::make_pair(1, 4.0))));
+}
+
+GTEST_TEST(TestMathematicalProgram, RemoveDecisionVariableError) {
+  // Test RemoveDecisionVariable with erroneous input.
+  // Remove an indeterminate.
+  MathematicalProgram prog;
+  auto x = prog.NewContinuousVariables<3>("x");
+  auto y = prog.NewIndeterminates<2>("y");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      prog.RemoveDecisionVariable(y(0)),
+      ".*is not a decision variable of this MathematicalProgram.");
+
+  // Remove a variable not in Mathematical program.
+  const symbolic::Variable dummy("dummy");
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      prog.RemoveDecisionVariable(dummy),
+      ".*is not a decision variable of this MathematicalProgram.");
+
+  // Remove a variable associated with a cost.
+  prog.AddLinearCost(x(0));
+  DRAKE_EXPECT_THROWS_MESSAGE(prog.RemoveDecisionVariable(x(0)),
+                              ".* is associated with a LinearCost.*");
+
+  // Remove a variable associated with a constraint.
+  prog.AddLinearConstraint(x(0) + x(1) <= 1);
+  DRAKE_EXPECT_THROWS_MESSAGE(prog.RemoveDecisionVariable(x(1)),
+                              ".* is associated with a LinearConstraint[^]*");
+
+  // Remove a variable associated with a visualization callback.
+  prog.AddVisualizationCallback(
+      [](const Eigen::VectorXd& vars) {
+        drake::log()->info("{}", vars(0));
+      },
+      Vector1<symbolic::Variable>(x(2)));
+  DRAKE_EXPECT_THROWS_MESSAGE(
+      prog.RemoveDecisionVariable(x(2)),
+      ".* is associated with a VisualizationCallback[^]*");
+}
+
 GTEST_TEST(TestMathematicalProgram, TestToLatex) {
   MathematicalProgram prog;
   std::string empty_prog = prog.ToLatex();
@@ -4408,26 +4484,22 @@ GTEST_TEST(TestMathematicalProgram, RemoveLinearConstraint) {
   auto lin_con2 = prog.AddLinearConstraint(x[0] + 2 * x[1] <= 1);
   EXPECT_EQ(prog.RemoveConstraint(lin_con1), 1);
   EXPECT_EQ(prog.linear_constraints().size(), 1u);
-  EXPECT_GT(
-      prog.required_capabilities().count(ProgramAttribute::kLinearConstraint),
-      0);
+  EXPECT_TRUE(prog.required_capabilities().contains(
+      ProgramAttribute::kLinearConstraint));
   // Now the program contains 2 lin_con2
   prog.AddConstraint(lin_con2);
   EXPECT_EQ(prog.RemoveConstraint(lin_con1), 0);
   EXPECT_EQ(prog.RemoveConstraint(lin_con2), 2);
   EXPECT_EQ(prog.linear_constraints().size(), 0u);
-  EXPECT_EQ(
-      prog.required_capabilities().count(ProgramAttribute::kLinearConstraint),
-      0);
+  EXPECT_FALSE(prog.required_capabilities().contains(
+      ProgramAttribute::kLinearConstraint));
 
   auto bbcon = prog.AddBoundingBoxConstraint(1, 2, x);
-  EXPECT_GT(
-      prog.required_capabilities().count(ProgramAttribute::kLinearConstraint),
-      0);
+  EXPECT_TRUE(prog.required_capabilities().contains(
+      ProgramAttribute::kLinearConstraint));
   EXPECT_EQ(prog.RemoveConstraint(bbcon), 1);
-  EXPECT_EQ(
-      prog.required_capabilities().count(ProgramAttribute::kLinearConstraint),
-      0);
+  EXPECT_FALSE(prog.required_capabilities().contains(
+      ProgramAttribute::kLinearConstraint));
 }
 
 GTEST_TEST(TestMathematicalProgram, RemoveConstraintPSD) {
@@ -4462,10 +4534,10 @@ void TestRemoveConstraint(MathematicalProgram* prog,
                           const std::vector<Binding<C>>* prog_constraints,
                           ProgramAttribute removed_capability) {
   ASSERT_EQ(prog_constraints->size(), 1);
-  ASSERT_GT(prog->required_capabilities().count(removed_capability), 0);
+  ASSERT_TRUE(prog->required_capabilities().contains(removed_capability));
   EXPECT_EQ(prog->RemoveConstraint(constraint), 1);
   EXPECT_EQ(prog_constraints->size(), 0u);
-  EXPECT_EQ(prog->required_capabilities().count(removed_capability), 0);
+  EXPECT_FALSE(prog->required_capabilities().contains(removed_capability));
 }
 
 GTEST_TEST(TestMathematicalProgram, RemoveConstraint) {
@@ -4500,6 +4572,24 @@ GTEST_TEST(TestMathematicalProgram, RemoveConstraint) {
   TestRemoveConstraint(&prog, lcp_con,
                        &(prog.linear_complementarity_constraints()),
                        ProgramAttribute::kLinearComplementarityConstraint);
+}
+
+GTEST_TEST(TestMathematicalProgram, RemoveVisualizationCallback) {
+  MathematicalProgram prog;
+  auto x = prog.NewContinuousVariables<3>();
+  auto callback = prog.AddVisualizationCallback(
+      [](const Eigen::VectorXd& vars) {
+        drake::log()->info("{}", vars(0) + vars(1));
+      },
+      x);
+  EXPECT_FALSE(prog.visualization_callbacks().empty());
+  EXPECT_TRUE(
+      prog.required_capabilities().contains(ProgramAttribute::kCallback));
+  int count = prog.RemoveVisualizationCallback(callback);
+  EXPECT_EQ(count, 1);
+  EXPECT_TRUE(prog.visualization_callbacks().empty());
+  EXPECT_FALSE(
+      prog.required_capabilities().contains(ProgramAttribute::kCallback));
 }
 
 class ApproximatePSDConstraint : public ::testing::Test {

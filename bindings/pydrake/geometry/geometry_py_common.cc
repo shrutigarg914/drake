@@ -422,6 +422,8 @@ void DoScalarIndependentDefinitions(py::module m) {
         .def("filename", &Convex::filename, doc.Convex.filename.doc)
         .def("extension", &Convex::extension, doc.Convex.extension.doc)
         .def("scale", &Convex::scale, doc.Convex.scale.doc)
+        .def("GetConvexHull", &Convex::GetConvexHull,
+            doc.Convex.GetConvexHull.doc)
         .def(py::pickle(
             [](const Convex& self) {
               return std::make_pair(self.filename(), self.scale());
@@ -474,6 +476,7 @@ void DoScalarIndependentDefinitions(py::module m) {
         .def("filename", &Mesh::filename, doc.Mesh.filename.doc)
         .def("extension", &Mesh::extension, doc.Mesh.extension.doc)
         .def("scale", &Mesh::scale, doc.Mesh.scale.doc)
+        .def("GetConvexHull", &Mesh::GetConvexHull, doc.Mesh.GetConvexHull.doc)
         .def(py::pickle(
             [](const Mesh& self) {
               return std::make_pair(self.filename(), self.scale());
@@ -514,8 +517,7 @@ void DoScalarIndependentDefinitions(py::module m) {
       doc.MakePhongIllustrationProperties.doc);
 
   m.def("AddContactMaterial",
-      py::overload_cast<const std::optional<double>&,
-          const std::optional<double>&,
+      py::overload_cast<std::optional<double>, std::optional<double>,
           const std::optional<multibody::CoulombFriction<double>>&,
           ProximityProperties*>(&AddContactMaterial),
       py::arg("dissipation"), py::arg("point_stiffness"), py::arg("friction"),
@@ -525,9 +527,8 @@ void DoScalarIndependentDefinitions(py::module m) {
   // named arguments to disambiguate which arguments get which values.
   m.def(
       "AddContactMaterial",
-      [](ProximityProperties* properties,
-          const std::optional<double>& dissipation,
-          const std::optional<double>& point_stiffness,
+      [](ProximityProperties* properties, std::optional<double> dissipation,
+          std::optional<double> point_stiffness,
           const std::optional<multibody::CoulombFriction<double>>& friction) {
         AddContactMaterial(dissipation, point_stiffness, friction, properties);
       },

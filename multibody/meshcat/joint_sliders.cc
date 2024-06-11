@@ -69,7 +69,7 @@ std::map<int, std::string> GetPositionNames(
 
   // Map all joints into the positions-to-name result.
   std::map<int, std::string> result;
-  for (JointIndex i{0}; i < plant->num_joints(); ++i) {
+  for (JointIndex i : plant->GetJointIndices()) {
     const Joint<T>& joint = plant->get_joint(i);
     for (int j = 0; j < joint.num_positions(); ++j) {
       const int position_index = joint.position_start() + j;
@@ -107,7 +107,7 @@ std::map<int, std::string> GetPositionNames(
 VectorXd Broadcast(
     const char* diagnostic_name, double default_value, int num_positions,
     std::variant<std::monostate, double, VectorXd> value) {
-  return visit_overloaded<VectorXd>(overloaded{
+  return std::visit<VectorXd>(overloaded{
     [num_positions, default_value](std::monostate) {
       return VectorXd::Constant(num_positions, default_value);
     },

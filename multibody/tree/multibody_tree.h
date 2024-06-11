@@ -30,7 +30,6 @@
 #include "drake/multibody/tree/multibody_tree_topology.h"
 #include "drake/multibody/tree/position_kinematics_cache.h"
 #include "drake/multibody/tree/spatial_inertia.h"
-#include "drake/multibody/tree/string_view_map_key.h"
 #include "drake/multibody/tree/velocity_kinematics_cache.h"
 #include "drake/systems/framework/context.h"
 
@@ -437,6 +436,9 @@ class MultibodyTree {
       const std::optional<math::RigidTransform<double>>& X_BM,
       Args&&... args);
 
+  // See MultibodyPlant documentation.
+  void RemoveJoint(const Joint<T>& joint);
+
   // Creates and adds a JointActuator model for an actuator acting on a given
   // `joint`.
   // This method returns a constant reference to the actuator just added, which
@@ -462,6 +464,9 @@ class MultibodyTree {
   const JointActuator<T>& AddJointActuator(
       const std::string& name, const Joint<T>& joint,
       double effort_limit = std::numeric_limits<double>::infinity());
+
+  // See MultibodyPlant documentation.
+  void RemoveJointActuator(const JointActuator<T>& actuator);
 
   // Creates a new model instance.  Returns the index for a new model
   // instance (as there is no concrete object beyond the index).
@@ -600,6 +605,11 @@ class MultibodyTree {
   }
 
   // See MultibodyPlant method.
+  bool has_joint(JointIndex joint_index) const {
+    return joints_.has_element(joint_index);
+  }
+
+  // See MultibodyPlant method.
   const Joint<T>& get_joint(JointIndex joint_index) const {
     return joints_.get_element(joint_index);
   }
@@ -607,6 +617,11 @@ class MultibodyTree {
   // See MultibodyPlant method.
   Joint<T>& get_mutable_joint(JointIndex joint_index) {
     return joints_.get_mutable_element(joint_index);
+  }
+
+  // See MultibodyPlant method.
+  bool has_joint_actuator(JointActuatorIndex actuator_index) const {
+    return actuators_.has_element(actuator_index);
   }
 
   // See MultibodyPlant method.
@@ -753,9 +768,19 @@ class MultibodyTree {
   std::vector<BodyIndex> GetBodyIndices(ModelInstanceIndex model_instance)
   const;
 
+  // See MultibodyPlant method.
+  const std::vector<JointIndex>& GetJointIndices() const {
+    return joints_.indices();
+  }
+
   // Returns a list of joint indices associated with `model_instance`.
   std::vector<JointIndex> GetJointIndices(ModelInstanceIndex model_instance)
   const;
+
+  // See MultibodyPlant method.
+  const std::vector<JointActuatorIndex>& GetJointActuatorIndices() const {
+    return actuators_.indices();
+  }
 
   // See MultibodyPlant method.
   std::vector<JointActuatorIndex> GetJointActuatorIndices(
@@ -846,8 +871,8 @@ class MultibodyTree {
   // Returns the mobilizer model for joint with index `joint_index`. The index
   // is invalid if the joint is not modeled with a mobilizer.
   MobilizerIndex get_joint_mobilizer(JointIndex joint_index) const {
-    DRAKE_DEMAND(joint_index < num_joints());
-    return joint_to_mobilizer_[joint_index];
+    DRAKE_DEMAND(has_joint(joint_index));
+    return joint_to_mobilizer_.at(joint_index);
   }
 
   // @name Model instance accessors
@@ -1039,10 +1064,10 @@ class MultibodyTree {
       const RigidBody<T>& body, const SpatialVelocity<T>& V_WB,
       const systems::Context<T>& context, systems::State<T>* state) const;
 
-  // See MultibodyPlant::SetFreeBodyRandomPositionDistribution.
+  // See MultibodyPlant::SetFreeBodyRandomTranslationDistribution.
   void SetFreeBodyRandomTranslationDistributionOrThrow(
       const RigidBody<T>& body,
-      const Vector3<symbolic::Expression>& position);
+      const Vector3<symbolic::Expression>& translation);
 
   // See MultibodyPlant::SetFreeBodyRandomRotationDistribution.
   void SetFreeBodyRandomRotationDistributionOrThrow(
@@ -1318,6 +1343,17 @@ class MultibodyTree {
   // not num_velocities().
   void CalcReflectedInertia(const systems::Context<T>& context,
       VectorX<T>* reflected_inertia) const;
+
+  // Computes the joint damping for each velocity index.
+  // @param[in] context
+  //  The context storing the state of the model.
+  // @param[out] joint_damping
+  //  For each degree of freedom, joint_damping[i] contains the viscous damping
+  //  coefficient for the i-th degree of freedom.
+  // @throws std::exception if joint_damping is nullptr or if its size is not
+  // num_velocities().
+  void CalcJointDamping(const systems::Context<T>& context,
+                        VectorX<T>* joint_damping) const;
 
   // Computes the composite body inertia Mc_B_W(q) for each body B in the
   // model about its frame origin Bo and expressed in the world frame W.
@@ -2209,6 +2245,11 @@ class MultibodyTree {
             tree_clone->owned_force_elements_[0].get());
     DRAKE_DEMAND(tree_clone->gravity_field_ != nullptr);
 
+    // Fill the `joints_` collection with nulls. This is to preserve the
+    // removed index structure of the ElementCollection when adding the clone's
+    // joints.
+    tree_clone->joints_.ResizeToMatch(joints_);
+
     // Since Joint<T> objects are implemented from basic element objects like
     // RigidBody, Mobilizer, ForceElement and Constraint, they are cloned last
     // so that the clones of their dependencies are guaranteed to be available.
@@ -2217,12 +2258,17 @@ class MultibodyTree {
       tree_clone->CloneJointAndAdd(*joint);
     }
 
+    // Fill the `actuators_` collection with nulls. This is to preserve the
+    // removed index structure of the ElementCollection when adding the cloned
+    // actuators.
+    tree_clone->actuators_.ResizeToMatch(actuators_);
+
     for (const JointActuator<T>* actuator : actuators_.elements()) {
       tree_clone->CloneActuatorAndAdd(*actuator);
     }
 
     // Register the cloned Joints with the multibody_graph_.
-    for (JointIndex index(0); index < num_joints(); ++index) {
+    for (JointIndex index : GetJointIndices()) {
       tree_clone->RegisterJointInGraph(tree_clone->get_joint(index));
     }
 
@@ -2705,6 +2751,14 @@ class MultibodyTree {
     return tree_system_->EvalReflectedInertiaCache(context);
   }
 
+  // Evaluates the cache entry stored in context with the joint damping for each
+  // degree of freedom in the system. These will be updated as needed.
+  const VectorX<T>& EvalJointDampingCache(
+      const systems::Context<T>& context) const {
+    DRAKE_ASSERT(tree_system_ != nullptr);
+    return tree_system_->EvalJointDampingCache(context);
+  }
+
   const std::vector<SpatialInertia<T>>& EvalCompositeBodyInertiaInWorldCache(
       const systems::Context<T>& context) const {
     DRAKE_ASSERT(tree_system_ != nullptr);
@@ -2997,7 +3051,7 @@ class MultibodyTree {
   // joint_index, mobilizer_index = joint_to_mobilizer_[joint_index] maps to the
   // mobilizer model of the joint, or an invalid index if the joint is modeled
   // with constraints instead.
-  std::vector<MobilizerIndex> joint_to_mobilizer_;
+  std::unordered_map<JointIndex, MobilizerIndex> joint_to_mobilizer_;
 
   // Maps the default body poses of all floating bodies AND bodies touched by
   // MultibodyPlant::SetDefaultFreeBodyPose(). During Finalize(), the default

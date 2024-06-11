@@ -399,7 +399,10 @@ def github_release_attachments(
         name,
         repository = None,
         commit = None,
+        commit_pin = None,
         attachments = None,
+        extract = None,
+        strip_prefix = None,
         build_file = None,
         mirrors = None,
         upgrade_advice = None,
@@ -416,8 +419,18 @@ def github_release_attachments(
         repository: required GitHub repository name in the form
             organization/project.
         commit: required commit is the tag name to download.
+        commit_pin: optional boolean, set to True iff the release should remain
+            at the same version indefinitely, eschewing automated upgrades to
+            newer versions.
         attachments: required dict whose keys are the filenames (attachment
             names) to download and values are the expected SHA-256 checksums.
+        extract: optional list of the filenames (attachment names) that should
+            be downloaded and extracted (e.g., `*.tgz` files), as opposed to
+            only downloaded.
+        strip_prefix: optional dict whose keys are the filenames (attachment
+            names) and values indicate a prefix to strip during extraction.
+            Note that this is only relevant for filenames that are also listed
+            under `extract`.
         build_file: required build file is the BUILD file label to use for
             building this external. As a Drake-specific abbreviation, when
             provided as a relative label (e.g., ":package.BUILD.bazel"), it
@@ -449,7 +462,10 @@ def github_release_attachments(
         name = name,
         repository = repository,
         commit = commit,
+        commit_pin = commit_pin,
         attachments = attachments,
+        extract = extract,
+        strip_prefix = strip_prefix,
         build_file = build_file,
         mirrors = mirrors,
         upgrade_advice = upgrade_advice,
@@ -475,9 +491,12 @@ _github_release_attachments_real = repository_rule(
         "commit": attr.string(
             mandatory = True,
         ),
+        "commit_pin": attr.bool(),
         "attachments": attr.string_dict(
             mandatory = True,
         ),
+        "extract": attr.string_list(),
+        "strip_prefix": attr.string_dict(),
         "build_file": attr.label(
             mandatory = True,
         ),
@@ -501,7 +520,10 @@ def setup_github_release_attachments(repository_ctx):
 
     repository = repository_ctx.attr.repository
     commit = repository_ctx.attr.commit
+    commit_pin = repository_ctx.attr.commit_pin
     attachments = repository_ctx.attr.attachments
+    extract = getattr(repository_ctx.attr, "extract", list())
+    strip_prefix = getattr(repository_ctx.attr, "strip_prefix", dict())
     mirrors = repository_ctx.attr.mirrors
     upgrade_advice = getattr(repository_ctx.attr, "upgrade_advice", "")
     patterns = mirrors.get("github_release_attachments")
@@ -517,11 +539,25 @@ def setup_github_release_attachments(repository_ctx):
             )
             for pattern in patterns
         ]
-        repository_ctx.download(
-            urls,
-            output = filename,
-            sha256 = _sha256(sha256),
-        )
+        if filename in extract:
+            maybe_strip_prefix = strip_prefix.get(filename, None)
+            if maybe_strip_prefix != None:
+                repository_ctx.download_and_extract(
+                    urls,
+                    stripPrefix = maybe_strip_prefix,
+                    sha256 = _sha256(sha256),
+                )
+            else:
+                repository_ctx.download_and_extract(
+                    urls,
+                    sha256 = _sha256(sha256),
+                )
+        else:
+            repository_ctx.download(
+                urls,
+                output = filename,
+                sha256 = _sha256(sha256),
+            )
         downloads.append(dict(
             urls = urls,
             sha256 = sha256,
@@ -536,7 +572,9 @@ def setup_github_release_attachments(repository_ctx):
         repository_rule_type = "github_release_attachments",
         repository = repository,
         commit = commit,
+        version_pin = commit_pin,
         attachments = attachments,
+        strip_prefix = strip_prefix,
         downloads = downloads,
         upgrade_advice = upgrade_advice,
     )

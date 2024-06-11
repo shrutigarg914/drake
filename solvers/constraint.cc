@@ -10,6 +10,7 @@
 
 #include "drake/common/symbolic/decompose.h"
 #include "drake/common/symbolic/latex.h"
+#include "drake/common/text_logging.h"
 #include "drake/math/autodiff_gradient.h"
 #include "drake/math/matrix_util.h"
 
@@ -98,11 +99,11 @@ std::string ToLatexConstraint(const Constraint& constraint,
                               int precision) {
   VectorX<symbolic::Expression> y(constraint.num_constraints());
   constraint.Eval(vars, &y);
-  return fmt::format(
-      "{}{}{}", ToLatexLowerBound(constraint, precision),
-      constraint.num_constraints() == 1 ? symbolic::ToLatex(y[0], precision)
-                                        : symbolic::ToLatex(y, precision),
-      ToLatexUpperBound(constraint, precision));
+  return fmt::format("{}{}{}", ToLatexLowerBound(constraint, precision),
+                     constraint.num_constraints() == 1
+                         ? symbolic::ToLatex(y[0], precision)
+                         : symbolic::ToLatex(y, precision),
+                     ToLatexUpperBound(constraint, precision));
 }
 
 }  // namespace
@@ -161,12 +162,22 @@ void QuadraticConstraint::UpdateHessianType(
   }
   Eigen::LDLT<Eigen::MatrixXd> ldlt_solver;
   ldlt_solver.compute(Q_);
-  if (ldlt_solver.isPositive()) {
-    hessian_type_ = HessianType::kPositiveSemidefinite;
-  } else if (ldlt_solver.isNegative()) {
-    hessian_type_ = HessianType::kNegativeSemidefinite;
-  } else {
+  if (ldlt_solver.info() != Eigen::Success) {
+    // Fall back to an indefinite Hessian type if we cannot determine the
+    // Hessian type.
+    drake::log()->warn(
+        "UpdateHessianType(): Unable to determine Hessian type of the "
+        "Quadratic Constraint. Falling "
+        "back to indefinite Hessian type.");
     hessian_type_ = HessianType::kIndefinite;
+  } else {
+    if (ldlt_solver.isPositive()) {
+      hessian_type_ = HessianType::kPositiveSemidefinite;
+    } else if (ldlt_solver.isNegative()) {
+      hessian_type_ = HessianType::kNegativeSemidefinite;
+    } else {
+      hessian_type_ = HessianType::kIndefinite;
+    }
   }
 }
 
@@ -397,16 +408,16 @@ LinearConstraint::LinearConstraint(const Eigen::Ref<const Eigen::MatrixXd>& A,
                                    const Eigen::Ref<const Eigen::VectorXd>& lb,
                                    const Eigen::Ref<const Eigen::VectorXd>& ub)
     : Constraint(A.rows(), A.cols(), lb, ub), A_(A) {
-  DRAKE_DEMAND(A.rows() == lb.rows());
-  DRAKE_DEMAND(A.array().isFinite().all());
+  DRAKE_THROW_UNLESS(A.rows() == lb.rows());
+  DRAKE_THROW_UNLESS(A.array().allFinite());
 }
 
 LinearConstraint::LinearConstraint(const Eigen::SparseMatrix<double>& A,
                                    const Eigen::Ref<const Eigen::VectorXd>& lb,
                                    const Eigen::Ref<const Eigen::VectorXd>& ub)
     : Constraint(A.rows(), A.cols(), lb, ub), A_(A) {
-  DRAKE_DEMAND(A.rows() == lb.rows());
-  DRAKE_DEMAND(A_.IsFinite());
+  DRAKE_THROW_UNLESS(A.rows() == lb.rows());
+  DRAKE_THROW_UNLESS(A_.IsFinite());
 }
 
 const Eigen::MatrixXd& LinearConstraint::GetDenseA() const {
@@ -426,7 +437,7 @@ void LinearConstraint::UpdateCoefficients(
   }
 
   A_ = new_A;
-  DRAKE_DEMAND(A_.IsFinite());
+  DRAKE_THROW_UNLESS(A_.IsFinite());
   set_num_outputs(A_.get_as_sparse().rows());
   set_bounds(new_lb, new_ub);
 }
@@ -443,7 +454,7 @@ void LinearConstraint::UpdateCoefficients(
     throw std::runtime_error("Can't change the number of decision variables");
   }
   A_ = new_A;
-  DRAKE_DEMAND(A_.IsFinite());
+  DRAKE_THROW_UNLESS(A_.IsFinite());
   set_num_outputs(A_.get_as_sparse().rows());
   set_bounds(new_lb, new_ub);
 }
@@ -500,18 +511,18 @@ std::ostream& LinearConstraint::DoDisplay(
   return DisplayConstraint(*this, os, "LinearConstraint", vars, false);
 }
 
-std::string LinearConstraint::DoToLatex(
-    const VectorX<symbolic::Variable>& vars, int precision) const {
+std::string LinearConstraint::DoToLatex(const VectorX<symbolic::Variable>& vars,
+                                        int precision) const {
   if (num_constraints() == 1) {
     return fmt::format(
         "{}{}{}", ToLatexLowerBound(*this, precision),
         symbolic::ToLatex((A_.get_as_sparse() * vars)[0], precision),
         ToLatexUpperBound(*this, precision));
   }
-  return fmt::format(
-      "{}{} {}{}", ToLatexLowerBound(*this, precision),
-      symbolic::ToLatex(GetDenseA(), precision), symbolic::ToLatex(vars),
-      ToLatexUpperBound(*this, precision));
+  return fmt::format("{}{} {}{}", ToLatexLowerBound(*this, precision),
+                     symbolic::ToLatex(GetDenseA(), precision),
+                     symbolic::ToLatex(vars),
+                     ToLatexUpperBound(*this, precision));
 }
 
 std::ostream& LinearEqualityConstraint::DoDisplay(
@@ -666,8 +677,8 @@ void PositiveSemidefiniteConstraint::DoEval(
 
 std::string PositiveSemidefiniteConstraint::DoToLatex(
     const VectorX<symbolic::Variable>& vars, int precision) const {
-  Eigen::Map<const MatrixX<symbolic::Variable>> S(
-      vars.data(), matrix_rows(), matrix_rows());
+  Eigen::Map<const MatrixX<symbolic::Variable>> S(vars.data(), matrix_rows(),
+                                                  matrix_rows());
   return fmt::format("{} \\succeq 0", symbolic::ToLatex(S.eval(), precision));
 }
 
@@ -698,17 +709,16 @@ void LinearMatrixInequalityConstraint::DoEval(
 }
 
 LinearMatrixInequalityConstraint::LinearMatrixInequalityConstraint(
-    const std::vector<Eigen::Ref<const Eigen::MatrixXd>>& F,
-    double symmetry_tolerance)
+    std::vector<Eigen::MatrixXd> F, double symmetry_tolerance)
     : Constraint(F.empty() ? 0 : F.front().rows(),
                  F.empty() ? 0 : F.size() - 1),
-      F_(F.begin(), F.end()),
-      matrix_rows_(F.empty() ? 0 : F.front().rows()) {
-  DRAKE_DEMAND(!F.empty());
+      F_{std::move(F)},
+      matrix_rows_(F_.empty() ? 0 : F_.front().rows()) {
+  DRAKE_DEMAND(!F_.empty());
   set_bounds(Eigen::VectorXd::Zero(matrix_rows_),
              Eigen::VectorXd::Constant(
                  matrix_rows_, std::numeric_limits<double>::infinity()));
-  for (const auto& Fi : F) {
+  for (const auto& Fi : F_) {
     DRAKE_ASSERT(Fi.rows() == matrix_rows_);
     DRAKE_ASSERT(math::IsSymmetric(Fi, symmetry_tolerance));
   }

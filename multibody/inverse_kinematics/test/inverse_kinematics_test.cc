@@ -71,8 +71,7 @@ GTEST_TEST(InverseKinematicsTest, ConstructorWithJointLimits) {
   // the joint limits are imposed when with_joint_limits=true, and the joint
   // limits are ignored when with_joint_limits=false.
   auto plant = ConstructIiwaPlant(
-      FindResourceOrThrow("drake/manipulation/models/iiwa_description/sdf/"
-                          "iiwa14_no_collision.sdf"),
+      "package://drake_models/iiwa_description/sdf/iiwa14_no_collision.sdf",
       0.01);
 
   InverseKinematics ik_with_joint_limits(*plant);
@@ -184,7 +183,7 @@ GTEST_TEST(InverseKinematicsTest, ConstructorLockedJoints) {
   // Leave joint1 unlocked.
 
   // Lock body2's floating joint to an un-normalized initial value.
-  joint2.set_quaternion(&*context, Eigen::Quaternion<double>(0, 3.0, 0, 0));
+  joint2.SetQuaternion(&*context, Eigen::Quaternion<double>(0, 3.0, 0, 0));
   joint2.Lock(&*context);
 
   // Set limits on joint3, but do not lock it.

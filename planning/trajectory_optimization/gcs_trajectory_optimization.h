@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -171,8 +172,33 @@ class GcsTrajectoryOptimization final {
     void AddVelocityBounds(const Eigen::Ref<const Eigen::VectorXd>& lb,
                            const Eigen::Ref<const Eigen::VectorXd>& ub);
 
+    /** Adds a nonlinear derivative constraints to the subgraph `lb` ≤
+    dᴺq(t) / dtᴺ ≤ `ub`.
+
+    This adds a nonlinear constraint to the restriction and MIP
+    GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+    relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+    "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+    The nonlinear constraint involves the derivative dᴺq(t) / dtᴺ
+    which is decomposed as dᴺr(s) / dsᴺ / hᴺ. The convex surrogate replaces the
+    nonlinear component hᴺ with h₀ᴺ⁻¹h, where h₀ is the characteristic time of
+    the set. For now, h₀ is set to 1.0 for all sets.
+
+    @param lb is the lower bound of the derivative.
+    @param ub is the upper bound of the derivative.
+    @param derivative_order is the order of the derivative to be constrained.
+
+    @throws std::exception if subgraph order is less than the derivative order.
+    @throws std::exception if the derivative order <= 1, since the linear
+      velocity bounds are preferred.
+    @throws std::exception if lb or ub are not of size num_positions().
+    */
+    void AddNonlinearDerivativeBounds(
+        const Eigen::Ref<const Eigen::VectorXd>& lb,
+        const Eigen::Ref<const Eigen::VectorXd>& ub, int derivative_order);
+
     /** Enforces derivative continuity constraints on the subgraph.
-     @param continuity_order is the order of the continuity constraint.
 
     Note that the constraints are on the control points of the
     derivatives of r(s) and not q(t). This may result in discontinuities of the
@@ -180,12 +206,39 @@ class GcsTrajectoryOptimization final {
     duration h to yield q(t). `NormalizeSegmentTimes()` will return r(s) with
     valid continuity.
 
+    @param continuity_order is the order of the continuity constraint.
+
     @throws std::exception if the continuity order is not equal or less than
         the order the subgraphs.
     @throws std::exception if the continuity order is less than one since path
     continuity is enforced by default.
     */
     void AddPathContinuityConstraints(int continuity_order);
+
+    /** Enforces derivative continuity constraints on the subgraph.
+
+    This adds a nonlinear constraint to the restriction and MIP
+    GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+    relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+    "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+    The continuity is enforced on the control points of q(t), which appear as
+    nonlinear constraints.
+    <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥᴺ </pre>
+    The convex surrogate is simply the path continuity, where hᵤᴺ and hᵥᴺ are
+    replaced by the characteristic times of the respective sets:
+    <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤ₀ᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥ₀ᴺ </pre>.
+    For now, these are set to one, but future work may involve scaling them by
+    the size of the sets.
+
+    @param continuity_order is the order of the continuity constraint.
+
+    @throws std::exception if the continuity order is not equal or less than
+      the order the subgraphs.
+    @throws std::exception if the continuity order is less than one since path
+      continuity is enforced by default.
+    */
+    void AddContinuityConstraints(int continuity_order);
 
    private:
     /* Constructs a new subgraph and copies the regions. */
@@ -259,9 +312,48 @@ class GcsTrajectoryOptimization final {
     void AddVelocityBounds(const Eigen::Ref<const Eigen::VectorXd>& lb,
                            const Eigen::Ref<const Eigen::VectorXd>& ub);
 
+    /** Adds a nonlinear derivative constraints to the control point connecting
+    the subgraphs `lb` ≤ dᴺq(t) / dtᴺ ≤ `ub`.
+
+    This adds a nonlinear constraint to the restriction and MIP
+    GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+    relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+    "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+    The nonlinear constraint involves the derivative dᴺq(t) / dtᴺ
+    which is decomposed as dᴺr(s) / dsᴺ / hᴺ. The convex surrogate replaces the
+    nonlinear component hᴺ with h₀ᴺ⁻¹h, where h₀ is the characteristic time of
+    the set. For now, h₀ is set to 1.0 for all sets.
+
+    @param lb is the lower bound of the derivative.
+    @param ub is the upper bound of the derivative.
+    @param derivative_order is the order of the derivative to be constrained.
+
+    @throws std::exception if both subgraphs order is less than the desired
+    derivative order.
+    @throws std::exception if the derivative order <= 1, since the linear
+      velocity bounds are preferred.
+    @throws std::exception if lb or ub are not of size num_positions().
+    */
+    void AddNonlinearDerivativeBounds(
+        const Eigen::Ref<const Eigen::VectorXd>& lb,
+        const Eigen::Ref<const Eigen::VectorXd>& ub, int derivative_order);
+
+    /** Enforces zero derivatives on the control point connecting the subgraphs.
+
+    For velocity, acceleration, jerk, etc. enforcing zero-derivative on the
+    trajectory q(t) is equivalent to enforcing zero-derivative on the trajectory
+    r(s). Hence this constraint is convex.
+    @param derivative_order is the order of the derivative to be constrained.
+
+    @throws std::exception if the derivative order < 1.
+    @throws std::exception if both subgraphs order is less than the desired
+    derivative order.
+    */
+    void AddZeroDerivativeConstraints(int derivative_order);
+
     /** Enforces derivative continuity constraints on the edges between the
     subgraphs.
-     @param continuity_order is the order of the continuity constraint.
 
     Note that the constraints are on the control points of the
     derivatives of r(s) and not q(t). This may result in discontinuities of the
@@ -269,12 +361,40 @@ class GcsTrajectoryOptimization final {
     duration h to yield q(t). `NormalizeSegmentTimes()` will return r(s) with
     valid continuity.
 
+    @param continuity_order is the order of the continuity constraint.
+
     @throws std::exception if the continuity order is not equal or less than
         the order of both subgraphs.
     @throws std::exception if the continuity order is less than one since path
     continuity is enforced by default.
     */
     void AddPathContinuityConstraints(int continuity_order);
+
+    /** Enforces derivative continuity constraints on the edges between the
+    subgraphs.
+
+    This adds a nonlinear constraint to the restriction and MIP
+    GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+    relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+    "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+    The continuity is enforced on the control points of q(t), which appear as
+    nonlinear constraints.
+    <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥᴺ </pre>
+    The convex surrogate is simply the path continuity, where hᵤᴺ and hᵥᴺ are
+    replaced by the characteristic times of the respective sets:
+    <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤ₀ᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥ₀ᴺ </pre>.
+    For now, these are set to one, but future work may involve scaling them by
+    the size of the sets.
+
+    @param continuity_order is the order of the continuity constraint.
+
+    @throws std::exception if the continuity order is not equal or less than
+      the order of both subgraphs.
+    @throws std::exception if the continuity order is less than one since path
+      continuity is enforced by default.
+    */
+    void AddContinuityConstraints(int continuity_order);
 
    private:
     EdgesBetweenSubgraphs(const Subgraph& from_subgraph,
@@ -315,8 +435,8 @@ class GcsTrajectoryOptimization final {
         const geometry::optimization::GraphOfConvexSets::Edge& e) const;
 
     GcsTrajectoryOptimization& traj_opt_;
-    const int from_subgraph_order_;
-    const int to_subgraph_order_;
+    const Subgraph& from_subgraph_;
+    const Subgraph& to_subgraph_;
 
     trajectories::BezierCurve<double> ur_trajectory_;
     trajectories::BezierCurve<double> vr_trajectory_;
@@ -414,6 +534,13 @@ class GcsTrajectoryOptimization final {
                        int order, double h_min = 0, double h_max = 20,
                        std::string name = "");
 
+  /** Remove a subgraph and all associated edges found in the subgraph and
+  to and from other subgraphs.
+  @pre The subgraph must have been created from a call to AddRegions() on this
+    object.
+  */
+  void RemoveSubgraph(const Subgraph& subgraph);
+
   /** Connects two subgraphs with directed edges.
   @param from_subgraph is the subgraph to connect from. Must have been created
   from a call to AddRegions() on this object, not some other optimization
@@ -493,8 +620,31 @@ class GcsTrajectoryOptimization final {
   void AddVelocityBounds(const Eigen::Ref<const Eigen::VectorXd>& lb,
                          const Eigen::Ref<const Eigen::VectorXd>& ub);
 
+  /** Adds a nonlinear derivative constraints to the entire graph `lb` ≤
+  dᴺq(t) / dtᴺ ≤ `ub`.
+
+  This adds a nonlinear constraint to the restriction and MIP
+  GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+  relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+  "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+  The nonlinear constraint involves the derivative dᴺq(t) / dtᴺ
+  which is decomposed as dᴺr(s) / dsᴺ / hᴺ. The convex surrogate replaces the
+  nonlinear component hᴺ with h₀ᴺ⁻¹h, where h₀ is the characteristic time of
+  the set. For now, h₀ is set to 1.0 for all sets.
+
+
+  @param lb is the lower bound of the derivative.
+  @param ub is the upper bound of the derivative.
+  @param derivative_order is the order of the derivative to be constrained.
+
+  @throws std::exception if lb or ub are not of size num_positions().
+  */
+  void AddNonlinearDerivativeBounds(const Eigen::Ref<const Eigen::VectorXd>& lb,
+                                    const Eigen::Ref<const Eigen::VectorXd>& ub,
+                                    int derivative_order);
+
   /** Enforces derivative continuity constraints on the entire graph.
-  @param continuity_order is the order of the continuity constraint.
 
   Note that the constraints are on the control points of the
   derivatives of r(s) and not q(t). This may result in discontinuities of the
@@ -502,10 +652,35 @@ class GcsTrajectoryOptimization final {
   duration h to yield q(t). `NormalizeSegmentTimes()` will return r(s) with
   valid continuity.
 
+  @param continuity_order is the order of the continuity constraint.
+
   @throws std::exception if the continuity order is less than one since path
   continuity is enforced by default.
   */
   void AddPathContinuityConstraints(int continuity_order);
+
+  /** Enforces derivative continuity constraints on the entire graph.
+
+  This adds a nonlinear constraint to the restriction and MIP
+  GraphOfConvexSets::Transcription, while adding a convex surrogate to the
+  relaxation. For more details, see @ref nonconvex_graph_of_convex_sets
+  "Guiding Non-convex Optimization with the GraphOfConvexSets".
+
+  The continuity is enforced on the control points of q(t), which appear as
+  nonlinear constraints.
+  <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥᴺ </pre>
+  The convex surrogate is simply the path continuity, where hᵤᴺ and hᵥᴺ are
+  replaced by the characteristic times of the respective sets:
+  <pre> (dᴺrᵤ(s=1) / dsᴺ) / hᵤ₀ᴺ == (dᴺrᵥ(s=0) / dsᴺ) / hᵥ₀ᴺ </pre>.
+  For now, these are set to one, but future work may involve scaling them by
+  the size of the sets.
+
+  @param continuity_order is the order of the continuity constraint.
+
+  @throws std::exception if the continuity order is less than one since path
+    continuity is enforced by default.
+  */
+  void AddContinuityConstraints(int continuity_order);
 
   /** Formulates and solves the mixed-integer convex formulation of the
   shortest path problem on the whole graph. @see
@@ -575,6 +750,12 @@ class GcsTrajectoryOptimization final {
   constraints as a rough approximation of the complexity of the subproblems. */
   double EstimateComplexity() const;
 
+  /** Returns a vector of all subgraphs. */
+  std::vector<Subgraph*> GetSubgraphs() const;
+
+  /** Returns a vector of all edges between subgraphs. */
+  std::vector<EdgesBetweenSubgraphs*> GetEdgesBetweenSubgraphs() const;
+
   /** Getter for the underlying GraphOfConvexSets. This is intended primarily
   for inspecting the resulting programs. */
   const geometry::optimization::GraphOfConvexSets& graph_of_convex_sets()
@@ -593,6 +774,44 @@ class GcsTrajectoryOptimization final {
   */
   static trajectories::CompositeTrajectory<double> NormalizeSegmentTimes(
       const trajectories::CompositeTrajectory<double>& trajectory);
+
+  /** Unwraps a trajectory with continuous revolute joints into a continuous
+   trajectory in the Euclidean space. Trajectories produced by
+   GcsTrajectoryOptimization for robotic systems with continuous revolute joints
+   may include apparent discontinuities, where a multiple of 2π is
+   instantaneously added to a joint value at the boundary between two adjacent
+   segments of the trajectory. This function removes such discontinuities by
+   adding or subtracting the appropriate multiple of 2π, "unwrapping" the
+   trajectory into a continuous representation suitable for downstream tasks
+   that do not take the joint wraparound into account.
+   @param gcs_trajectory The trajectory to unwrap.
+   @param continuous_revolute_joints The indices of the continuous revolute
+   joints.
+   @param starting_rounds A vector of integers that sets the starting rounds for
+   each continuous revolute joint. Given integer k for the starting_round of a
+   joint, its initial position will be wrapped into [2πk , 2π(k+1)). If the
+   starting rounds are not provided, the initial position of @p trajectory will
+   be unchanged.
+
+   @returns an unwrapped (continous in Euclidean space) CompositeTrajectory.
+
+   @throws std::exception if
+   starting_rounds.size()!=continuous_revolute_joints.size().
+   @throws std::exception if continuous_revolute_joints contain repeated indices
+   and/or indices outside the range [0, gcs_trajectory.rows()).
+   @throws std::exception if the gcs_trajectory is not continuous on the
+   manifold defined by the continuous_revolute_joints, i.e., the shift between
+   two consecutive segments is not an integer multiple of 2π (within a tolerance
+   of 1e-10 radians).
+   @throws std::exception if all the segments are not of type BezierCurve.
+   Other types are not supported yet. Note that currently the output of
+   GcsTrajectoryOptimization::SolvePath() is a CompositeTrajectory of
+   BezierCurves.
+    */
+  static trajectories::CompositeTrajectory<double> UnwrapToContinousTrajectory(
+      const trajectories::CompositeTrajectory<double>& gcs_trajectory,
+      std::vector<int> continuous_revolute_joints,
+      std::optional<std::vector<int>> starting_rounds = std::nullopt);
 
  private:
   const int num_positions_;
@@ -619,6 +838,9 @@ class GcsTrajectoryOptimization final {
   std::vector<Eigen::MatrixXd> global_path_length_costs_;
   std::vector<std::pair<Eigen::VectorXd, Eigen::VectorXd>>
       global_velocity_bounds_{};
+  std::vector<std::tuple<Eigen::VectorXd, Eigen::VectorXd, int>>
+      global_nonlinear_derivative_bounds_{};
+  std::vector<int> global_path_continuity_constraints_{};
   std::vector<int> global_continuity_constraints_{};
 };
 

@@ -40,6 +40,7 @@ LIBDRAKE_COMPONENTS = [
     "//geometry/optimization",
     "//geometry/proximity",
     "//geometry/query_results",
+    "//geometry/render",
     "//geometry/render/shaders",
     "//geometry/render_gl",
     "//geometry/render_gltf_client",
@@ -70,12 +71,15 @@ LIBDRAKE_COMPONENTS = [
     "//multibody/plant:contact_results_to_lcm",  # unpackaged
     "//multibody/rational",
     "//multibody/topology:multibody_graph",  # unpackaged
+    "//multibody/topology:multibody_topology",  # unpackaged
     "//multibody/tree",
     "//multibody/triangle_quadrature",
     "//perception",
     "//planning",
-    "//planning/trajectory_optimization",
     "//planning/graph_algorithms",
+    "//planning/iris",
+    "//planning/locomotion",
+    "//planning/trajectory_optimization",
     "//solvers",
     "//systems/analysis",
     "//systems/controllers",
