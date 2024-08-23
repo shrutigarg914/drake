@@ -268,6 +268,34 @@ void SetEdgeContainmentTerminationCondition(
 /** Defines a standardized representation for (named) IrisRegions, which can be
 serialized in both C++ and Python. */
 typedef std::map<std::string, HPolyhedron> IrisRegions;
+/** A variation of the IrisInConfigurationSpace (Iterative Region Inflation by
+Semidefinite programming) algorithm which finds collision-free regions in the
+*rational parametrization of the configuration space* of @p plant.  @see
+IrisInConfigurationSpace for details on the original algorithm. Similar to
+IrisInConfigurationSpace, this code uses non-linear optimization (rather than
+convex optimization) to generate regions in rational configuration space which
+are *largely* collision-free, but may contain some collisions. If rigorous
+certificates of non-collision are desired, these regions can be certified as
+collision free using the C-IRIS algorithm implemented in cspace_free_polytope.h
+
+@param plant describes the kinematics of configuration space.  It must be
+connected to a SceneGraph in a systems::Diagram.
+@param context is a context of the @p plant. The context must have the positions
+of the plant set to the initial IRIS seed configuration.
+@param q_star the point in the configuration space around which the rational
+parametrization is take. @see RationalForwardKinematics for more details.
+@param options provides additional configuration options.  In particular,
+increasing `options.num_collision_infeasible_samples` increases the chances that
+the IRIS regions are collision free but can also significantly increase the
+run-time of the algorithm. The same goes for
+`options.num_additional_constraints_infeasible_samples`.
+@ingroup geometry_optimization
+*/
+HPolyhedron IrisInRationalConfigurationSpace(
+    const multibody::MultibodyPlant<double>& plant,
+    const systems::Context<double>& context,
+    const Eigen::Ref<const Eigen::VectorXd>& q_star,
+    const IrisOptions& options = IrisOptions());
 
 }  // namespace optimization
 }  // namespace geometry

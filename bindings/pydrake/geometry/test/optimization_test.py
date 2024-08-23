@@ -161,7 +161,7 @@ class TestGeometryOptimization(unittest.TestCase):
             basis, translation), tol=0))
         self.assertTrue(dut.IsNearlyEqualTo(other=mut.AffineSubspace(
             basis, translation), tol=0))
-        self.assertFalse(dut.ContainedIn(other=mut.AffineSubspace(), tol=0))
+        self.assertFalse(dut.Containedn(other=mut.AffineSubspace(), tol=0))
         self.assertFalse(mut.AffineSubspace().ContainedIn(other=dut, tol=0))
         self.assertFalse(dut.IsNearlyEqualTo(other=mut.AffineSubspace(),
                                              tol=0))
@@ -730,6 +730,14 @@ class TestGeometryOptimization(unittest.TestCase):
         self.assertEqual(region.ambient_dimension(), 1)
         self.assertTrue(region.PointInSet([1.0]))
         self.assertFalse(region.PointInSet([-1.0]))
+        region_rational = mut.IrisInRationalConfigurationSpace(
+            plant=plant, context=plant.GetMyContextFromRoot(context),
+            q_star=np.zeros(1), options=options)
+        self.assertIsInstance(region_rational, mut.ConvexSet)
+        self.assertEqual(region_rational.ambient_dimension(), 1)
+        self.assertTrue(region_rational.PointInSet([1.0]))
+        self.assertFalse(region_rational.PointInSet([-1.0]))
+
 
     def test_serialize_iris_regions(self):
         iris_regions = {

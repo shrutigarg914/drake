@@ -622,6 +622,19 @@ void DefineGeometryOptimization(py::module m) {
       py::arg("filename"), py::arg("child_name") = std::nullopt,
       "Calls LoadYamlFile() to deserialize an IrisRegions object.");
 
+  m.def(
+      "IrisInRationalConfigurationSpace",
+      [](const multibody::MultibodyPlant<double>& plant,
+          const systems::Context<double>& context,
+          const Eigen::Ref<const Eigen::VectorXd>& q_star,
+          const IrisOptions& options) {
+        return IrisInRationalConfigurationSpace(
+            plant, context, q_star, options);
+      },
+      py::arg("plant"), py::arg("context"), py::arg("q_star"),
+      py::arg("options") = IrisOptions(),
+      doc.IrisInRationalConfigurationSpace.doc);
+
   // GraphOfConvexSetsOptions
   {
     const auto& cls_doc = doc.GraphOfConvexSetsOptions;
@@ -985,6 +998,7 @@ void DefineGeometryOptimization(py::module m) {
     cspace_free_polytope_base_cls
         // TODO(Alexandre.Amice): Bind rational_forward_kinematics to resolve
         // #20025.
+        .def("rational_forward_kin", &BaseClass::rational_forward_kin, base_cls_doc.rational_forward_kin.doc)
         .def("map_geometries_to_separating_planes",
             &BaseClass::map_geometries_to_separating_planes,
             base_cls_doc.map_geometries_to_separating_planes.doc)
